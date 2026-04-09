@@ -53,6 +53,9 @@ from collections import defaultdict
 
 
 TW_SECONDS_FIXED = 10
+INDOOR_LOC_TYPES = {"Indoor", "Office"}
+OUTDOOR_LOC_TYPES = {"Outdoor", "Road", "Parking", "Garage"}
+ALLOWED_LOC_TYPES = tuple(sorted(INDOOR_LOC_TYPES | OUTDOOR_LOC_TYPES))
 
 
 def ensure_dir(p: str) -> None:
@@ -269,9 +272,9 @@ def density_profile(name: str) -> Dict[str, DensityCfg]:
 def gen_locations(rng: random.Random, n: int) -> List[Tuple[str, str, str]]:
     loc_types = [
         ("Outdoor", 0.25),
-        ("Entrance", 0.20),
+        ("Road", 0.20),
         ("Office", 0.20),
-        ("Corridor", 0.15),
+        ("Indoor", 0.15),
         ("Parking", 0.12),
         ("Garage", 0.08),
     ]
@@ -287,10 +290,10 @@ def gen_cameras(rng: random.Random, locations: List[Tuple[str, str, str]], cams_
     cams = []
     c = 1
     for loc_id, loc_name, loc_type in locations:
+        is_indoor = "true" if loc_type in INDOOR_LOC_TYPES else "false"
         for j in range(cams_per_loc):
             cam_id = fmt_cam(c)
             view = rng.choice(view_types)
-            is_indoor = "true" if loc_type in ("Office", "Corridor", "Garage", "Parking") and rng.random() < 0.75 else "false"
             cam_name = f"Cam_{loc_name}_{j+1}"
             cams.append((cam_id, cam_name, view, is_indoor, loc_id))
             c += 1
@@ -520,12 +523,20 @@ def main():
     }
 
     locations = gen_locations(rng, args.num_locations)
+    for loc_id, _loc_name, loc_type in locations:
+        if loc_type not in ALLOWED_LOC_TYPES:
+            raise ValueError(f"Invalid loc_type={loc_type} for loc_id={loc_id}")
     loc_to_partition = {loc_id: i + 1 for i, (loc_id, _, _) in enumerate(locations)}
     loc_to_type = {loc_id: loc_type for (loc_id, _, loc_type) in locations}
     loc_rows_by_id = {loc_id: [loc_id, name, loc_type] for (loc_id, name, loc_type) in locations}
 
 
     cameras = gen_cameras(rng, locations, args.cameras_per_location)
+    camera_to_indoor = {cam_id: (is_indoor == "true") for (cam_id, _cam_name, _view_type, is_indoor, _loc_id) in cameras}
+    for cam_id, _cam_name, _view_type, is_indoor, loc_id in cameras:
+        expected_indoor = loc_to_type[loc_id] in INDOOR_LOC_TYPES
+        if (is_indoor == "true") != expected_indoor:
+            raise ValueError(f"Camera indoor mismatch for camera_id={cam_id}, loc_id={loc_id}")
 
     # Build a mapping from location to cameras for easy cross‑camera movement.
     # We build this after cameras are generated to avoid referencing an undefined
@@ -632,6 +643,8 @@ def main():
             for k in range(int(video_per_day)):
                 st = day_start_dt + timedelta(seconds=k * args.video_duration_seconds)
                 en = st + timedelta(seconds=args.video_duration_seconds)
+                if not st < en:
+                    raise ValueError(f"Invalid video interval for camera_id={cam_id}, date={date_str}")
                 vid = make_video_id(cam_id, day_base, st)
                 row = VideoRow(vid, cam_id, part, date_str, st, en, args.fps, args.resolution)
                 videos.append(row)
@@ -659,6 +672,7 @@ def main():
             loc1 = fmt_loc(i)
             loc2 = fmt_loc(i + 1)
             p1 = loc_to_partition[loc1]
+            p2 = loc_to_partition[loc2]
             # NEAR_BY is structural: no timestamps, camera/location context
             row = [
                 loc1,
@@ -677,6 +691,23 @@ def main():
             ]
             rels_w.writerow(row)
             partition_writers.writerow(p1, "rels.csv", row)
+            reverse_row = [
+                loc2,
+                loc1,
+                "NEAR_BY",
+                "",
+                "",
+                "",
+                "",
+                str(p2),
+                "",
+                "",
+                "",
+                "",
+                "distance=50",
+            ]
+            rels_w.writerow(reverse_row)
+            partition_writers.writerow(p2, "rels.csv", reverse_row)
 
     for day_date in dates:
         date_str = yyyy_mm_dd(datetime.combine(day_date, time(0, 0, 0)))
@@ -826,6 +857,8 @@ def main():
                 if cfg.interact_ratio > 0 and target_persons < 2 and len(pool_p) >= 2:
                     target_persons = 2
                 target_vehicles = min(int(base_v * mult), len(pool_v))
+                if camera_to_indoor.get(cam_id, False) or loc_type in INDOOR_LOC_TYPES:
+                    target_vehicles = 0
 
                 # --- Cross‑camera movement logic ---
                 # We maintain a dictionary of active persons per camera across time windows.
