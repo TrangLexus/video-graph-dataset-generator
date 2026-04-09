@@ -128,6 +128,39 @@ def sample_detection_interval(
         raise ValueError("Invalid detection interval: outside TW bounds")
     return start, end
 
+
+def validate_detection_context(
+    ts_start: datetime,
+    ts_end: datetime,
+    tw_start: datetime,
+    tw_end: datetime,
+    tw_key: str,
+    day_midnight: datetime,
+    video: "VideoRow",
+    expected_camera_id: str,
+    expected_location_id: str,
+    camera_location_lookup: Dict[str, str],
+) -> None:
+    """
+    Enforce strict Layer-5 constraints for one DETECTED_IN edge.
+    TimeWindow is interpreted as half-open [tw_start, tw_end).
+    """
+    if not (ts_start < ts_end):
+        raise ValueError("Invalid DETECTED_IN interval: ts_start must be < ts_end")
+    if not (tw_start <= ts_start and ts_end <= tw_end):
+        raise ValueError("Invalid DETECTED_IN interval: outside [tw_start, tw_end)")
+    if not (video.start_time <= ts_start < ts_end <= video.end_time):
+        raise ValueError("Invalid DETECTED_IN interval: outside video bounds")
+    expected_tw_idx = int((ts_start - day_midnight).total_seconds() // TW_SECONDS_FIXED)
+    expected_tw_key = f"TW{expected_tw_idx:04d}"
+    if tw_key != expected_tw_key:
+        raise ValueError(f"tw_id mismatch for detection: expected {expected_tw_key}, got {tw_key}")
+    if video.camera_id != expected_camera_id:
+        raise ValueError("camera_id mismatch between DETECTED_IN and video")
+    mapped_location_id = camera_location_lookup.get(expected_camera_id)
+    if mapped_location_id != expected_location_id:
+        raise ValueError("location_id mismatch between DETECTED_IN and camera")
+
 def overlap_interval(
     a_start: datetime,
     a_end: datetime,
@@ -558,6 +591,7 @@ def main():
 
     cameras = gen_cameras(rng, locations, args.cameras_per_location)
     camera_to_indoor = {cam_id: (is_indoor == "true") for (cam_id, _cam_name, _view_type, is_indoor, _loc_id) in cameras}
+    camera_to_location = {cam_id: loc_id for (cam_id, _cam_name, _view_type, _is_indoor, loc_id) in cameras}
     for cam_id, _cam_name, _view_type, is_indoor, loc_id in cameras:
         expected_indoor = loc_to_type[loc_id] in INDOOR_LOC_TYPES
         if (is_indoor == "true") != expected_indoor:
@@ -1030,19 +1064,21 @@ def main():
                 for vh in vehicles_present:
                     presence_plan_tw[vh] = (loc_id, cam_id, video.video_id)
 
+                tw_presence_entries: List[Tuple[str, str, str, str]] = []
                 for ent_id, (ent_loc_id, ent_cam_id, ent_video_id) in presence_plan_tw.items():
-                    presence_plan[ent_id].append((tw_key, ent_loc_id, ent_cam_id, ent_video_id))
+                    entry = (tw_key, ent_loc_id, ent_cam_id, ent_video_id)
+                    presence_plan[ent_id].append(entry)
+                    tw_presence_entries.append((ent_id, ent_loc_id, ent_cam_id, ent_video_id))
 
                 person_tw_ids: List[str] = []
-                for pid in persons_present:
-                    if pid not in presence_plan_tw:
+                for pid, ent_loc_id, ent_cam_id, ent_video_id in tw_presence_entries:
+                    if pid not in persons_present:
                         continue
                     # Build Person-TW ID
                     pid_tw = f"{pid}_TW{tw_tag}"
                     if pid_tw in entity_tw_ids_created:
                         raise ValueError(f"Duplicate Entity_TW generated: {pid_tw}")
                     person_tw_ids.append(pid_tw)
-                    _, ent_cam_id, ent_video_id = presence_plan_tw[pid]
                     p_det_start, p_det_end = sample_detection_interval(
                         rng,
                         tw_start,
@@ -1051,6 +1087,18 @@ def main():
                         video.end_time,
                         min_seconds=min_duration_seconds,
                         max_seconds=8,
+                    )
+                    validate_detection_context(
+                        p_det_start,
+                        p_det_end,
+                        tw_start,
+                        tw_end,
+                        tw_key,
+                        t0,
+                        video,
+                        ent_cam_id,
+                        ent_loc_id,
+                        camera_to_location,
                     )
                     # Write Person-TW node with dynamic attributes (shirt, pant, pose)
                     pose_states = ["Standing", "Walking", "Running", "Sitting"]
@@ -1087,7 +1135,7 @@ def main():
                         tw_key,                 # tw_id
                         str(part),              # partition_id
                         ent_cam_id,             # camera_id
-                        loc_id,                 # location_id
+                        ent_loc_id,             # location_id
                         random_confidence(rng), # confidence
                         random_bbox_json(rng),  # bbox
                         "",                    # description
@@ -1101,18 +1149,17 @@ def main():
                         "ts_end": p_det_end.isoformat(sep=" "),
                         "video_id": ent_video_id,
                         "camera_id": ent_cam_id,
-                        "location_id": loc_id,
+                        "location_id": ent_loc_id,
                     }
 
                 thing_tw_ids: List[str] = []
-                for tid in things_present:
-                    if tid not in presence_plan_tw:
+                for tid, ent_loc_id, ent_cam_id, ent_video_id in tw_presence_entries:
+                    if tid not in things_present:
                         continue
                     tid_tw = f"{tid}_TW{tw_tag}"
                     if tid_tw in entity_tw_ids_created:
                         raise ValueError(f"Duplicate Entity_TW generated: {tid_tw}")
                     thing_tw_ids.append(tid_tw)
-                    _, ent_cam_id, ent_video_id = presence_plan_tw[tid]
                     t_det_start, t_det_end = sample_detection_interval(
                         rng,
                         tw_start,
@@ -1121,6 +1168,18 @@ def main():
                         video.end_time,
                         min_seconds=min_duration_seconds,
                         max_seconds=8,
+                    )
+                    validate_detection_context(
+                        t_det_start,
+                        t_det_end,
+                        tw_start,
+                        tw_end,
+                        tw_key,
+                        t0,
+                        video,
+                        ent_cam_id,
+                        ent_loc_id,
+                        camera_to_location,
                     )
                     # Retrieve static attributes for thing
                     ttype, size_cat, base_color = thing_attrs.get(tid, ("Bag", "Medium", "Black"))
@@ -1150,7 +1209,7 @@ def main():
                         tw_key,
                         str(part),
                         ent_cam_id,
-                        loc_id,
+                        ent_loc_id,
                         random_confidence(rng),
                         random_bbox_json(rng),
                         "",
@@ -1164,18 +1223,17 @@ def main():
                         "ts_end": t_det_end.isoformat(sep=" "),
                         "video_id": ent_video_id,
                         "camera_id": ent_cam_id,
-                        "location_id": loc_id,
+                        "location_id": ent_loc_id,
                     }
 
                 vehicle_tw_ids: List[str] = []
-                for vh in vehicles_present:
-                    if vh not in presence_plan_tw:
+                for vh, ent_loc_id, ent_cam_id, ent_video_id in tw_presence_entries:
+                    if vh not in vehicles_present:
                         continue
                     vh_tw = f"{vh}_TW{tw_tag}"
                     if vh_tw in entity_tw_ids_created:
                         raise ValueError(f"Duplicate Entity_TW generated: {vh_tw}")
                     vehicle_tw_ids.append(vh_tw)
-                    _, ent_cam_id, ent_video_id = presence_plan_tw[vh]
                     v_det_start, v_det_end = sample_detection_interval(
                         rng,
                         tw_start,
@@ -1184,6 +1242,18 @@ def main():
                         video.end_time,
                         min_seconds=min_duration_seconds,
                         max_seconds=8,
+                    )
+                    validate_detection_context(
+                        v_det_start,
+                        v_det_end,
+                        tw_start,
+                        tw_end,
+                        tw_key,
+                        t0,
+                        video,
+                        ent_cam_id,
+                        ent_loc_id,
+                        camera_to_location,
                     )
                     # Lookup vehicle static attributes
                     vtype, vcolor = vehicle_attrs.get(vh, ("Car", "White"))
@@ -1234,7 +1304,7 @@ def main():
                         tw_key,
                         str(part),
                         ent_cam_id,
-                        loc_id,
+                        ent_loc_id,
                         random_confidence(rng),
                         random_bbox_json(rng),
                         "",
@@ -1248,7 +1318,7 @@ def main():
                         "ts_end": v_det_end.isoformat(sep=" "),
                         "video_id": ent_video_id,
                         "camera_id": ent_cam_id,
-                        "location_id": loc_id,
+                        "location_id": ent_loc_id,
                     }
 
     for ent_tw_id in entity_tw_ids_created:
