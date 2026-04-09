@@ -1,4 +1,4 @@
-python generator/dataGeneration_TrangEdit_Ver19.py ^
+python generator/dataGeneration.py ^
 --out output ^
 --days 1 ^
 --num_locations 4 ^
