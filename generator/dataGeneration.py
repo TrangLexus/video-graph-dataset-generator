@@ -988,13 +988,13 @@ def main():
                 v1 = vlist[i - 1]
                 v2 = vlist[i]
                 boundary_time = v1.end_time
-                boundary_end = boundary_time + timedelta(seconds=1)
+                # boundary_end = boundary_time + timedelta(seconds=1)
                 row = [
                     v1.video_id,
                     v2.video_id,
                     "NEXT_TO",
                     boundary_time,
-                    boundary_end,
+                    boundary_time,
                     v1.date,
                     "",
                     str(v1.partition_id),

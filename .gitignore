@@ -1,0 +1,7 @@
+sample_output/
+by_partition/
+*.csv
+*.parquet
+__pycache__/
+*.pyc
+.vscode/
