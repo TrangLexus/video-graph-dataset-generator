@@ -1,0 +1,11 @@
+python generator/dataGeneration_TrangEdit_Ver19.py ^
+--out output ^
+--days 1 ^
+--num_locations 4 ^
+--cameras_per_location 2 ^
+--persons_pool 40 ^
+--things_pool 15 ^
+--vehicles_pool 10 ^
+--day_seconds 3600 ^
+--video_duration_seconds 300 ^
+--density_profile realistic

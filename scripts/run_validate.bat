@@ -1,0 +1,1 @@
+python validator/verify_dataset.py --data_dir output
