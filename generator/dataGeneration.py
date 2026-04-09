@@ -46,7 +46,7 @@ import os
 import random
 import shutil
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 import json
 from typing import Dict, List, Tuple
 from collections import defaultdict
@@ -87,6 +87,8 @@ def sample_interval_within_tw(
     The returned (start, end) tuple satisfies tw_start <= start < end <= tw_end,
     with duration between min_seconds and max_seconds (clamped to fit within the window).
     """
+    min_seconds = max(1, int(min_seconds))
+    max_seconds = max(min_seconds, int(max_seconds))
     tw_len = int((tw_end - tw_start).total_seconds())
     # ensure the duration does not exceed the window length
     max_len = min(max_seconds, tw_len)
@@ -295,33 +297,33 @@ def gen_cameras(rng: random.Random, locations: List[Tuple[str, str, str]], cams_
     return cams
 
 
-def gen_daily_people(rng: random.Random, day0: datetime, n: int) -> List[List[str]]:
+def gen_daily_people(rng: random.Random, day_dt: datetime, n: int) -> List[List[str]]:
     genders = [("Male", 0.52), ("Female", 0.48)]
     age_groups = [("Child", 0.08), ("Adult", 0.78), ("Senior", 0.14)]
     rows = []
     for seq in range(1, n + 1):
-        pid = mk_daily_entity_id("P", day0, seq)
+        pid = mk_daily_entity_id("P", day_dt, seq)
         rows.append([pid, choice_weighted(rng, genders), choice_weighted(rng, age_groups)])
     return rows
 
 
-def gen_daily_things(rng: random.Random, day0: datetime, n: int) -> List[List[str]]:
+def gen_daily_things(rng: random.Random, day_dt: datetime, n: int) -> List[List[str]]:
     thing_types = [("Backpack", 0.40), ("Handbag", 0.25), ("Bag", 0.20), ("Suitcase", 0.10), ("Box", 0.05)]
     sizes = [("Small", 0.35), ("Medium", 0.45), ("Large", 0.20)]
     colors = ["Black", "Blue", "Gray", "Red", "Green", "White", "Brown"]
     rows = []
     for seq in range(1, n + 1):
-        tid = mk_daily_entity_id("T", day0, seq)
+        tid = mk_daily_entity_id("T", day_dt, seq)
         rows.append([tid, choice_weighted(rng, thing_types), choice_weighted(rng, sizes), rng.choice(colors)])
     return rows
 
 
-def gen_daily_vehicles(rng: random.Random, day0: datetime, n: int) -> List[List[str]]:
+def gen_daily_vehicles(rng: random.Random, day_dt: datetime, n: int) -> List[List[str]]:
     vtypes = [("Car", 0.65), ("Motorbike", 0.25), ("Bus", 0.05), ("Truck", 0.05)]
     colors = ["White", "Black", "Gray", "Red", "Blue"]
     rows = []
     for seq in range(1, n + 1):
-        vid = mk_daily_entity_id("VH", day0, seq)
+        vid = mk_daily_entity_id("VH", day_dt, seq)
         rows.append([vid, choice_weighted(rng, vtypes), rng.choice(colors)])
     return rows
 
@@ -561,21 +563,26 @@ def main():
     all_people_rows: List[List[str]] = []
     all_thing_rows: List[List[str]] = []
     all_vehicle_rows: List[List[str]] = []
-    daily_people_pool: Dict[int, List[str]] = {}
-    daily_thing_pool: Dict[int, List[str]] = {}
-    daily_vehicle_pool: Dict[int, List[str]] = {}
+    daily_people_pool: Dict[str, List[str]] = {}
+    daily_thing_pool: Dict[str, List[str]] = {}
+    daily_vehicle_pool: Dict[str, List[str]] = {}
 
-    for day in range(args.days):
-        day0 = (datetime(2026, 2, 1) + timedelta(days=day)).replace(hour=0, minute=0, second=0)
-        ppl = gen_daily_people(rng, day0, args.persons_pool)
-        ths = gen_daily_things(rng, day0, args.things_pool)
-        vhs = gen_daily_vehicles(rng, day0, args.vehicles_pool)
+    today = datetime.now().date()
+    dates = [today - timedelta(days=i) for i in range(args.days)]
+    dates.reverse()  # past -> present, never future
+
+    for day_date in dates:
+        day_dt = datetime.combine(day_date, time(0, 0, 0))
+        date_key = yyyy_mm_dd(day_dt)
+        ppl = gen_daily_people(rng, day_dt, args.persons_pool)
+        ths = gen_daily_things(rng, day_dt, args.things_pool)
+        vhs = gen_daily_vehicles(rng, day_dt, args.vehicles_pool)
         all_people_rows.extend(ppl)
         all_thing_rows.extend(ths)
         all_vehicle_rows.extend(vhs)
-        daily_people_pool[day] = [r[0] for r in ppl]
-        daily_thing_pool[day] = [r[0] for r in ths]
-        daily_vehicle_pool[day] = [r[0] for r in vhs]
+        daily_people_pool[date_key] = [r[0] for r in ppl]
+        daily_thing_pool[date_key] = [r[0] for r in ths]
+        daily_vehicle_pool[date_key] = [r[0] for r in vhs]
 
     # Build lookup dictionaries for thing and vehicle attributes
     # These are used later when writing dynamic Thing_TW and Vehicle_TW rows.
@@ -591,17 +598,15 @@ def main():
     write_csv(os.path.join(args.out, "nodes_vehicle.csv"), headers["nodes_vehicle.csv"], all_vehicle_rows)
 
     timewindow_rows: List[List[str]] = []
-    for day in range(args.days):
-        day_base = datetime(2026, 2, 1) + timedelta(days=day)
+    for day_date in dates:
+        day_base = datetime.combine(day_date, time(0, 0, 0))
         date_str = yyyy_mm_dd(day_base)
+        t0 = datetime.combine(day_date, time(0, 0, 0))
         day_start_dt = day_base.replace(hour=day_start_h, minute=day_start_m, second=day_start_s)
-        for tw_in_day in range(1, int(tw_per_day) + 1):
-            # Compute time window start relative to the day's midnight (t0)
-            st = day_start_dt + timedelta(seconds=(tw_in_day - 1) * TW_SECONDS_FIXED)
+        for tw_in_day in range(int(tw_per_day)):
+            st = day_start_dt + timedelta(seconds=tw_in_day * TW_SECONDS_FIXED)
             en = st + timedelta(seconds=TW_SECONDS_FIXED)
-            # tw_idx is based on total seconds since midnight // 10s
-            offset_seconds = int((st - day_base).total_seconds())
-            tw_idx = offset_seconds // TW_SECONDS_FIXED
+            tw_idx = int((st - t0).total_seconds() // TW_SECONDS_FIXED)
             tw_id_val = f"TW{tw_idx:04d}"
             timewindow_rows.append([date_str, tw_id_val, hhmmss(st), hhmmss(en), str(TW_SECONDS_FIXED)])
     write_csv(os.path.join(args.out, "nodes_timewindow.csv"), headers["nodes_timewindow.csv"], timewindow_rows)
@@ -617,9 +622,9 @@ def main():
         )
 
     videos: List[VideoRow] = []
-    videos_by_cam_day: Dict[Tuple[int, str], List[VideoRow]] = defaultdict(list)
-    for day in range(args.days):
-        day_base = datetime(2026, 2, 1) + timedelta(days=day)
+    videos_by_cam_day: Dict[Tuple[str, str], List[VideoRow]] = defaultdict(list)
+    for day_date in dates:
+        day_base = datetime.combine(day_date, time(0, 0, 0))
         date_str = yyyy_mm_dd(day_base)
         day_start_dt = day_base.replace(hour=day_start_h, minute=day_start_m, second=day_start_s)
         for cam_id, _cam_name, _view_type, _is_indoor, loc_id in cameras:
@@ -630,7 +635,7 @@ def main():
                 vid = make_video_id(cam_id, day_base, st)
                 row = VideoRow(vid, cam_id, part, date_str, st, en, args.fps, args.resolution)
                 videos.append(row)
-                videos_by_cam_day[(day, cam_id)].append(row)
+                videos_by_cam_day[(date_str, cam_id)].append(row)
 
     videos.sort(key=lambda x: (x.date, x.start_time, x.camera_id))
     for k in videos_by_cam_day:
@@ -673,20 +678,21 @@ def main():
             rels_w.writerow(row)
             partition_writers.writerow(p1, "rels.csv", row)
 
-    for day in range(args.days):
+    for day_date in dates:
+        date_str = yyyy_mm_dd(datetime.combine(day_date, time(0, 0, 0)))
         for cam_id, *_rest in cameras:
-            vlist = videos_by_cam_day[(day, cam_id)]
+            vlist = videos_by_cam_day[(date_str, cam_id)]
             for i in range(1, len(vlist)):
                 v1 = vlist[i - 1]
                 v2 = vlist[i]
-                # For NEXT_TO, both ts_start and ts_end equal the boundary between segments
                 boundary_time = v1.end_time
+                boundary_end = boundary_time + timedelta(seconds=1)
                 row = [
                     v1.video_id,
                     v2.video_id,
                     "NEXT_TO",
                     boundary_time,
-                    boundary_time,
+                    boundary_end,
                     v1.date,
                     "",
                     str(v1.partition_id),
@@ -701,34 +707,34 @@ def main():
 
     shirt_colors = ["Blue", "Black", "Gray", "Red", "Green", "White", "Brown", "Yellow"]
     pant_colors = ["Black", "Blue", "Gray", "Brown", "White"]
-    active_persons: Dict[Tuple[int, str], List[str]] = {}
-    active_vehicles: Dict[Tuple[int, str], List[str]] = {}
+    active_persons: Dict[Tuple[str, str], List[str]] = {}
+    active_vehicles: Dict[Tuple[str, str], List[str]] = {}
     wrote_located_at = set()
     wrote_recorded_by = set()
 
-    for day in range(args.days):
-        day_base = datetime(2026, 2, 1) + timedelta(days=day)
+    min_duration_seconds = 1
+    for day_date in dates:
+        day_base = datetime.combine(day_date, time(0, 0, 0))
         date_str = yyyy_mm_dd(day_base)
+        t0 = datetime.combine(day_date, time(0, 0, 0))
         day_start_dt = day_base.replace(hour=day_start_h, minute=day_start_m, second=day_start_s)
-        pool_p = daily_people_pool[day]
-        pool_t = daily_thing_pool[day]
-        pool_v = daily_vehicle_pool[day]
+        pool_p = daily_people_pool[date_str]
+        pool_t = daily_thing_pool[date_str]
+        pool_v = daily_vehicle_pool[date_str]
         # Maintain per-day persistent attributes for people and vehicles
         # person_clothes maps person id to (shirt_color, pant_color)
         person_clothes = {}
         # vehicle_prev maps vehicle id to (speed, direction)
         vehicle_prev = {}
 
-        for tw_in_day in range(1, int(tw_per_day) + 1):
-            tw_start = day_start_dt + timedelta(seconds=(tw_in_day - 1) * TW_SECONDS_FIXED)
+        for tw_in_day in range(int(tw_per_day)):
+            tw_start = day_start_dt + timedelta(seconds=tw_in_day * TW_SECONDS_FIXED)
             tw_end = tw_start + timedelta(seconds=TW_SECONDS_FIXED)
-            video_idx = (tw_in_day - 1) // tw_per_video
+            video_idx = tw_in_day // tw_per_video
             if video_idx >= video_per_day:
                 continue
 
-            # Compute time window index based on seconds since day's midnight
-            offset_seconds = int((tw_start - day_base).total_seconds())
-            tw_idx = offset_seconds // TW_SECONDS_FIXED
+            tw_idx = int((tw_start - t0).total_seconds() // TW_SECONDS_FIXED)
             tw_tag = f"{tw_idx:04d}"
             tw_key = f"TW{tw_idx:04d}"
 
@@ -740,7 +746,7 @@ def main():
                 part = loc_to_partition[loc_id]
                 loc_type = loc_to_type.get(loc_id, "Outdoor")
                 cfg = dens_map.get(loc_type, dens_map["Outdoor"])
-                vlist = videos_by_cam_day[(day, cam_id)]
+                vlist = videos_by_cam_day[(date_str, cam_id)]
                 if video_idx >= len(vlist):
                     continue
                 video = vlist[video_idx]
@@ -827,7 +833,7 @@ def main():
                 # cameras based on a small probability.  However, to ensure each person
                 # appears in at most one camera per TimeWindow, we will remove any
                 # candidate who has already been assigned to another camera in this TW
-                key = (day, cam_id)
+                key = (date_str, cam_id)
                 prev_p = active_persons.get(key, [])
                 # persons who stay at the same camera
                 keep_n = clamp_int(int(len(prev_p) * cfg.stay_rate), 0, min(len(prev_p), target_persons))
@@ -981,6 +987,8 @@ def main():
                         p_det_start, p_det_end = overlap_start, overlap_end
                     else:
                         p_det_start, p_det_end = sample_interval_within_tw(rng, tw_start, tw_end, 2, 8)
+                    if (p_det_end - p_det_start).total_seconds() < min_duration_seconds:
+                        p_det_end = min(tw_end, p_det_start + timedelta(seconds=min_duration_seconds))
                     person_intervals[pid_tw] = (p_det_start, p_det_end)
                     # Write Person-TW node with dynamic attributes (shirt, pant, pose)
                     pose_states = ["Standing", "Walking", "Running", "Sitting"]
@@ -1030,6 +1038,8 @@ def main():
                     thing_tw_ids.append(tid_tw)
                     # Random detection interval for thing
                     t_det_start, t_det_end = sample_interval_within_tw(rng, tw_start, tw_end, 2, 8)
+                    if (t_det_end - t_det_start).total_seconds() < min_duration_seconds:
+                        t_det_end = min(tw_end, t_det_start + timedelta(seconds=min_duration_seconds))
                     thing_intervals[tid_tw] = (t_det_start, t_det_end)
                     # Retrieve static attributes for thing
                     ttype, size_cat, base_color = thing_attrs.get(tid, ("Bag", "Medium", "Black"))
@@ -1072,6 +1082,8 @@ def main():
                     vehicle_tw_ids.append(vh_tw)
                     # Random detection interval for vehicle
                     v_det_start, v_det_end = sample_interval_within_tw(rng, tw_start, tw_end, 2, 8)
+                    if (v_det_end - v_det_start).total_seconds() < min_duration_seconds:
+                        v_det_end = min(tw_end, v_det_start + timedelta(seconds=min_duration_seconds))
                     vehicle_intervals[vh_tw] = (v_det_start, v_det_end)
                     # Lookup vehicle static attributes
                     vtype, vcolor = vehicle_attrs.get(vh, ("Car", "White"))
@@ -1140,6 +1152,8 @@ def main():
                         if not overlap:
                             continue
                         rel_start, rel_end = overlap
+                        if (rel_end - rel_start).total_seconds() < min_duration_seconds:
+                            continue
                         row = [
                             carrier,                 # source (Person_TW)
                             tid_tw,                  # dest (Thing_TW)
@@ -1170,6 +1184,8 @@ def main():
                                 if not overlap:
                                     continue
                                 rel_start, rel_end = overlap
+                                if (rel_end - rel_start).total_seconds() < min_duration_seconds:
+                                    continue
                                 row = [
                                     u,
                                     vh_tw,
@@ -1223,6 +1239,8 @@ def main():
                             if not overlap:
                                 continue
                             rel_start, rel_end = overlap
+                            if (rel_end - rel_start).total_seconds() < min_duration_seconds:
+                                continue
                             row = [
                                 pair[0],
                                 pair[1],
