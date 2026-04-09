@@ -444,6 +444,218 @@ class PartitionWriters:
                 w.close()
 
 
+def _read_csv_dicts(path: str) -> List[Dict[str, str]]:
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Required file not found: {path}")
+    with open(path, newline="", encoding="utf-8") as f:
+        return list(csv.DictReader(f))
+
+
+def _parse_hms_on_date(date_str: str, hms: str) -> datetime:
+    return datetime.fromisoformat(f"{date_str} {hms}")
+
+
+def write_layer8_partitions_and_validate(out_root: str, loc_to_type: Dict[str, str]) -> None:
+    """
+    Layer 8:
+      1) Write partitions by (date, location_id): out/date=YYYY-MM-DD/loc=LOC_ID
+      2) Validate fail-fast constraints for Entity_TW, DETECTED_IN, relations, and partition consistency
+    """
+    # Load root tables
+    person_tw = _read_csv_dicts(os.path.join(out_root, "nodes_person_TW.csv"))
+    thing_tw = _read_csv_dicts(os.path.join(out_root, "nodes_thing_TW.csv"))
+    vehicle_tw = _read_csv_dicts(os.path.join(out_root, "nodes_vehicle_TW.csv"))
+    rels = _read_csv_dicts(os.path.join(out_root, "rels.csv"))
+    tw_rows = _read_csv_dicts(os.path.join(out_root, "nodes_timewindow.csv"))
+    video_rows = _read_csv_dicts(os.path.join(out_root, "nodes_video.csv"))
+
+    entity_rows = person_tw + thing_tw + vehicle_tw
+    entity_ids = {r[next(iter(r.keys()))] for r in entity_rows}
+    entity_by_id = {r[next(iter(r.keys()))]: r for r in entity_rows}
+
+    # Prepare lookup maps
+    tw_bounds: Dict[Tuple[str, str], Tuple[datetime, datetime]] = {}
+    for row in tw_rows:
+        t0 = _parse_hms_on_date(row["date"], row["start_time"])
+        t1 = _parse_hms_on_date(row["date"], row["end_time"])
+        tw_bounds[(row["date"], row["tw_id"])] = (t0, t1)
+    video_bounds: Dict[str, Tuple[datetime, datetime]] = {}
+    for row in video_rows:
+        v0 = _parse_hms_on_date(row["date"], row["start_time"])
+        v1 = _parse_hms_on_date(row["date"], row["end_time"])
+        video_bounds[row["video_id"]] = (v0, v1)
+
+    # CHECK 1 + 2 + 7 (entity has exactly one DETECTED_IN + validity)
+    detected_in = [r for r in rels if r["type"] == "DETECTED_IN"]
+    det_by_entity: Dict[str, List[Dict[str, str]]] = defaultdict(list)
+    for d in detected_in:
+        det_by_entity[d["source_id"]].append(d)
+        if d["source_id"] not in entity_ids:
+            raise ValueError(f"DETECTED_IN references missing Entity_TW: {d['source_id']}")
+        if d["destination_id"] not in video_bounds:
+            raise ValueError(f"DETECTED_IN references missing video_id: {d['destination_id']}")
+        ts_start = datetime.fromisoformat(d["ts_start"])
+        ts_end = datetime.fromisoformat(d["ts_end"])
+        if not (ts_start < ts_end):
+            raise ValueError(f"DETECTED_IN must satisfy ts_start < ts_end: {d['source_id']}")
+        if (d["date"], d["tw_id"]) not in tw_bounds:
+            raise ValueError(f"Missing TimeWindow for detection: {(d['date'], d['tw_id'])}")
+        tw_start, tw_end = tw_bounds[(d["date"], d["tw_id"])]
+        if not (tw_start <= ts_start < ts_end <= tw_end):
+            raise ValueError(f"DETECTED_IN outside TimeWindow for {d['source_id']}")
+        vid_start, vid_end = video_bounds[d["destination_id"]]
+        if not (vid_start <= ts_start < ts_end <= vid_end):
+            raise ValueError(f"DETECTED_IN outside video range for {d['source_id']}")
+    for ent_id in entity_ids:
+        if len(det_by_entity.get(ent_id, [])) != 1:
+            raise ValueError(f"Entity_TW must have exactly one DETECTED_IN: {ent_id}")
+
+    det_interval = {
+        ent_id: (
+            datetime.fromisoformat(rows[0]["ts_start"]),
+            datetime.fromisoformat(rows[0]["ts_end"]),
+            rows[0]["location_id"],
+            rows[0]["date"],
+        )
+        for ent_id, rows in det_by_entity.items()
+    }
+
+    # CHECK 3 + 7 + 8 (positive overlap + no orphan relations + no duplicate edges)
+    relation_types = {"INTERACTS_WITH", "CARRIES", "USES"}
+    typed_rels = [r for r in rels if r["type"] in relation_types]
+    edge_seen = set()
+    interacts_seen = set()
+    nearby_seen = set()
+    for r in typed_rels:
+        src, dst = r["source_id"], r["destination_id"]
+        if src not in entity_ids or dst not in entity_ids:
+            raise ValueError(f"Relation has orphan endpoint: {r}")
+        ts_start = datetime.fromisoformat(r["ts_start"])
+        ts_end = datetime.fromisoformat(r["ts_end"])
+        if not (ts_start < ts_end):
+            raise ValueError(f"Relation must satisfy ts_start < ts_end: {r}")
+        src_start, src_end, _src_loc, _src_date = det_interval[src]
+        dst_start, dst_end, _dst_loc, _dst_date = det_interval[dst]
+        ov = overlap_interval(src_start, src_end, dst_start, dst_end)
+        if ov is None or not (ov[0] < ov[1]):
+            raise ValueError(f"Relation overlap must be > 0: {r}")
+        edge_key = (r["type"], src, dst, r["ts_start"], r["ts_end"])
+        if edge_key in edge_seen:
+            raise ValueError(f"Duplicate edge detected: {edge_key}")
+        edge_seen.add(edge_key)
+        if r["type"] == "INTERACTS_WITH":
+            interacts_seen.add((src, dst, r["ts_start"], r["ts_end"]))
+
+    for r in rels:
+        if r["type"] == "NEAR_BY":
+            nearby_seen.add((r["source_id"], r["destination_id"]))
+
+    # CHECK 4 (undirected consistency)
+    for src, dst, ts_start, ts_end in interacts_seen:
+        if (dst, src, ts_start, ts_end) not in interacts_seen:
+            raise ValueError(f"INTERACTS_WITH reverse edge missing: {src} -> {dst}")
+    for src, dst in nearby_seen:
+        if (dst, src) not in nearby_seen:
+            raise ValueError(f"NEAR_BY reverse edge missing: {src} -> {dst}")
+
+    # CHECK 5 (vehicle semantic constraint)
+    for ent_id, row in entity_by_id.items():
+        if not ent_id.startswith("VH") and not ent_id.startswith("V"):
+            continue
+        _s, _e, loc_id, _d = det_interval[ent_id]
+        if loc_to_type.get(loc_id) in INDOOR_LOC_TYPES:
+            raise ValueError(f"Vehicle appears in indoor location: entity={ent_id}, location={loc_id}")
+
+    # Partition write target (date x location)
+    partition_root = out_root
+    for r in person_tw:
+        drow = det_by_entity[r["pid_tw"]][0]
+        pdir = os.path.join(partition_root, f"date={drow['date']}", f"loc={drow['location_id']}")
+        ensure_dir(pdir)
+    for r in thing_tw:
+        drow = det_by_entity[r["tid_tw"]][0]
+        pdir = os.path.join(partition_root, f"date={drow['date']}", f"loc={drow['location_id']}")
+        ensure_dir(pdir)
+    for r in vehicle_tw:
+        drow = det_by_entity[r["vid_tw"]][0]
+        pdir = os.path.join(partition_root, f"date={drow['date']}", f"loc={drow['location_id']}")
+        ensure_dir(pdir)
+
+    # Build partition buckets and enforce no Entity_TW duplication across partitions
+    person_parts: Dict[Tuple[str, str], List[List[str]]] = defaultdict(list)
+    thing_parts: Dict[Tuple[str, str], List[List[str]]] = defaultdict(list)
+    vehicle_parts: Dict[Tuple[str, str], List[List[str]]] = defaultdict(list)
+    rel_parts: Dict[Tuple[str, str], List[List[str]]] = defaultdict(list)
+    entity_partition_seen: Dict[str, Tuple[str, str]] = {}
+
+    def _assign_entity_row(ent_id: str, row_values: List[str], bucket: Dict[Tuple[str, str], List[List[str]]]) -> None:
+        det = det_by_entity[ent_id][0]
+        key = (det["date"], det["location_id"])
+        prev = entity_partition_seen.get(ent_id)
+        if prev is not None and prev != key:
+            raise ValueError(f"Entity_TW duplicated across partitions: {ent_id}")
+        entity_partition_seen[ent_id] = key
+        bucket[key].append(row_values)
+
+    for r in person_tw:
+        _assign_entity_row(r["pid_tw"], [r[h] for h in r.keys()], person_parts)
+    for r in thing_tw:
+        _assign_entity_row(r["tid_tw"], [r[h] for h in r.keys()], thing_parts)
+    for r in vehicle_tw:
+        _assign_entity_row(r["vid_tw"], [r[h] for h in r.keys()], vehicle_parts)
+
+    partition_rel_types = {"DETECTED_IN", "INTERACTS_WITH", "CARRIES", "USES"}
+    rel_unique_per_partition: Dict[Tuple[str, str], set] = defaultdict(set)
+    for r in rels:
+        if r["type"] not in partition_rel_types:
+            continue
+        key = (r["date"], r["location_id"])
+        row_values = [r[h] for h in r.keys()]
+        rel_key = (r["source_id"], r["destination_id"], r["type"], r["ts_start"], r["ts_end"])
+        if rel_key in rel_unique_per_partition[key]:
+            raise ValueError(f"Duplicate relation in partition {key}: {rel_key}")
+        rel_unique_per_partition[key].add(rel_key)
+        rel_parts[key].append(row_values)
+
+    # Persist partition files
+    person_header = [*person_tw[0].keys()] if person_tw else []
+    thing_header = [*thing_tw[0].keys()] if thing_tw else []
+    vehicle_header = [*vehicle_tw[0].keys()] if vehicle_tw else []
+    rels_header = [*rels[0].keys()] if rels else []
+
+    all_keys = set(person_parts.keys()) | set(thing_parts.keys()) | set(vehicle_parts.keys()) | set(rel_parts.keys())
+    for date_str, loc_id in sorted(all_keys):
+        pdir = os.path.join(partition_root, f"date={date_str}", f"loc={loc_id}")
+        ensure_dir(pdir)
+        if person_header:
+            write_csv(os.path.join(pdir, "nodes_person_TW.csv"), person_header, person_parts.get((date_str, loc_id), []))
+        if thing_header:
+            write_csv(os.path.join(pdir, "nodes_thing_TW.csv"), thing_header, thing_parts.get((date_str, loc_id), []))
+        if vehicle_header:
+            write_csv(os.path.join(pdir, "nodes_vehicle_TW.csv"), vehicle_header, vehicle_parts.get((date_str, loc_id), []))
+        if rels_header:
+            write_csv(os.path.join(pdir, "rels.csv"), rels_header, rel_parts.get((date_str, loc_id), []))
+
+    # CHECK 6 (partition consistency: total row count, missing entities, no duplication)
+    root_entity_count = len(person_tw) + len(thing_tw) + len(vehicle_tw)
+    part_entity_count = sum(len(v) for v in person_parts.values()) + sum(len(v) for v in thing_parts.values()) + sum(len(v) for v in vehicle_parts.values())
+    if root_entity_count != part_entity_count:
+        raise ValueError(f"Partition entity row mismatch: root={root_entity_count}, partition={part_entity_count}")
+    if len(entity_partition_seen) != len(entity_ids):
+        raise ValueError("Missing entities in partition output")
+    root_rel_count = sum(1 for r in rels if r["type"] in partition_rel_types)
+    part_rel_count = sum(len(v) for v in rel_parts.values())
+    if root_rel_count != part_rel_count:
+        raise ValueError(f"Partition relation row mismatch: root={root_rel_count}, partition={part_rel_count}")
+
+    print({
+        "entity_valid": "PASS",
+        "detection_valid": "PASS",
+        "relation_valid": "PASS",
+        "partition_valid": "PASS",
+    })
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
@@ -1515,83 +1727,13 @@ def main():
     # Close partition writers to flush partition files
     partition_writers.close()
 
-    # ----------------------------------------------------------------------
-    # Post‑processing step to ensure that root dynamic node files contain all
-    # rows that were written into partition files.  In some rare cases the
-    # root CSV writers may miss a small number of rows due to buffering or
-    # execution order, which leads to a mismatch between the row counts
-    # reported in the root directory and the sum of rows in the per‑partition
-    # subdirectories.  To guarantee consistency, we load the per‑partition
-    # dynamic node files (Person_TW, Thing_TW, Vehicle_TW) and append any
-    # rows not already present in the corresponding root file.  This
-    # operation is idempotent and does not introduce duplicates because
-    # we maintain a set of existing identifiers.
-    def append_missing_rows(root_path: str, part_subdir: str, id_col: int) -> None:
-        """
-        Ensure that every row present in any partition file for a given
-        dynamic CSV also exists in the root file.  Arguments:
-            root_path: absolute path to the root CSV file
-            part_subdir: filename within each partition directory
-            id_col: index of the identifier column in the CSV rows
-        The function reads the existing root rows into a set of IDs, then
-        iterates through every partition file of the same name.  If a row
-        has an ID not present in the root set, the row is appended to
-        the root CSV.  This preserves all partition data in the root.
-        """
-        # Load existing rows into memory and capture header
-        if not os.path.exists(root_path):
-            return
-        with open(root_path, newline="", encoding="utf-8") as rf:
-            reader = list(csv.reader(rf))
-            if not reader:
-                return
-            header = reader[0]
-            existing_rows = reader[1:]
-        existing_ids = {row[id_col] for row in existing_rows}
-        new_rows = []
-        part_root = os.path.join(args.out, "by_partition")
-        if os.path.isdir(part_root):
-            for part in os.listdir(part_root):
-                part_path = os.path.join(part_root, part, part_subdir)
-                if not os.path.exists(part_path):
-                    continue
-                with open(part_path, newline="", encoding="utf-8") as pf:
-                    preader = csv.reader(pf)
-                    # Skip header
-                    try:
-                        next(preader)
-                    except StopIteration:
-                        continue
-                    for prow in preader:
-                        if len(prow) <= id_col:
-                            continue
-                        pid = prow[id_col]
-                        # Append to new_rows if not already in root
-                        if pid not in existing_ids:
-                            new_rows.append(prow)
-                            existing_ids.add(pid)
-        # If there are new rows, append them to the root file
-        if new_rows:
-            with open(root_path, "a", newline="", encoding="utf-8") as rf:
-                writer = csv.writer(rf)
-                for r in new_rows:
-                    writer.writerow(r)
-
-    # Apply the consolidation for dynamic node files
-    append_missing_rows(
-        os.path.join(args.out, "nodes_person_TW.csv"), "nodes_person_TW.csv", id_col=0
-    )
-    append_missing_rows(
-        os.path.join(args.out, "nodes_thing_TW.csv"), "nodes_thing_TW.csv", id_col=0
-    )
-    append_missing_rows(
-        os.path.join(args.out, "nodes_vehicle_TW.csv"), "nodes_vehicle_TW.csv", id_col=0
-    )
+    # Layer 8 partitioning + fail-fast validation
+    write_layer8_partitions_and_validate(args.out, loc_to_type)
 
     # Reprint summary information after consolidation
     print("DONE")
     print(f"TimeWindow fixed = {TW_SECONDS_FIXED}s. Root CSVs kept unchanged at: {args.out}")
-    print(f"Partition folders created at: {os.path.join(args.out, 'by_partition')}")
+    print(f"Partition folders created at: {os.path.join(args.out, 'date=YYYY-MM-DD/loc=<LOCATION_ID>')}")
     print(f"days={args.days}, day_seconds={args.day_seconds}, tw_per_day={tw_per_day}")
     print(f"video_duration={args.video_duration_seconds}s, video_per_day={video_per_day}, tw_per_video={tw_per_video}")
 
