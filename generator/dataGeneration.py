@@ -103,6 +103,31 @@ def sample_interval_within_tw(
     end_dt = start_dt + timedelta(seconds=duration)
     return start_dt, end_dt
 
+def sample_detection_interval(
+    rng: random.Random,
+    tw_start: datetime,
+    tw_end: datetime,
+    video_start: datetime,
+    video_end: datetime,
+    min_seconds: int = 1,
+    max_seconds: int = 8,
+) -> Tuple[datetime, datetime]:
+    """
+    Sample one detection interval using half-open TW semantics [tw_start, tw_end).
+    Guarantees: tw_start <= start < end <= tw_end and video_start <= start < end <= video_end.
+    """
+    start, end = sample_interval_within_tw(rng, tw_start, tw_end, min_seconds, max_seconds)
+    start = max(start, video_start)
+    end = min(end, video_end)
+    if not (start < end):
+        end = min(video_end, tw_end)
+        start = max(video_start, tw_start, end - timedelta(seconds=max(1, min_seconds)))
+    if not (video_start <= start < end <= video_end):
+        raise ValueError("Invalid detection interval: outside video bounds")
+    if not (tw_start <= start < end <= tw_end):
+        raise ValueError("Invalid detection interval: outside TW bounds")
+    return start, end
+
 def overlap_interval(
     a_start: datetime,
     a_end: datetime,
@@ -742,6 +767,11 @@ def main():
     active_vehicles: Dict[Tuple[str, str], List[str]] = {}
     wrote_located_at = set()
     wrote_recorded_by = set()
+    presence_plan: Dict[str, List[Tuple[str, str, str, str]]] = defaultdict(list)
+    det_index: Dict[Tuple[str, str], List[str]] = defaultdict(list)
+    det_by_entity: Dict[str, Dict[str, str]] = {}
+    entity_tw_ids_created = set()
+    detection_count_by_entity = defaultdict(int)
 
     min_duration_seconds = 1
     for day_date in dates:
@@ -769,9 +799,10 @@ def main():
             tw_tag = f"{tw_idx:04d}"
             tw_key = f"TW{tw_idx:04d}"
 
-            # Track which persons and vehicles have already been assigned to a camera in this TW
+            # Track which entities have already been assigned to a camera in this TW
             assigned_persons = set()
             assigned_vehicles = set()
+            assigned_things = set()
 
             for cam_id, _cam_name, _view_type, _is_indoor, loc_id in cameras:
                 part = loc_to_partition[loc_id]
@@ -879,7 +910,7 @@ def main():
                 for other_cam in cams_by_loc[loc_id]:
                     if other_cam == cam_id:
                         continue
-                    prev_o = active_persons.get((day, other_cam), [])
+                    prev_o = active_persons.get((date_str, other_cam), [])
                     move_n = int(len(prev_o) * move_fraction)
                     if move_n > 0:
                         movers = rng.sample(prev_o, min(move_n, len(prev_o)))
@@ -890,12 +921,12 @@ def main():
                                 prev_o.remove(m)
                             except ValueError:
                                 pass
-                        active_persons[(day, other_cam)] = prev_o
+                        active_persons[(date_str, other_cam)] = prev_o
 
                 # Move persons from neighbouring locations' cameras
                 for nbr_loc in location_graph.get(loc_id, []):
                     for nbr_cam in cams_by_loc.get(nbr_loc, []):
-                        prev_n = active_persons.get((day, nbr_cam), [])
+                        prev_n = active_persons.get((date_str, nbr_cam), [])
                         move_n2 = int(len(prev_n) * move_fraction)
                         if move_n2 > 0:
                             movers2 = rng.sample(prev_n, min(move_n2, len(prev_n)))
@@ -905,7 +936,7 @@ def main():
                                     prev_n.remove(m)
                                 except ValueError:
                                     pass
-                            active_persons[(day, nbr_cam)] = prev_n
+                            active_persons[(date_str, nbr_cam)] = prev_n
 
                 # Remove duplicates and persons already assigned to other cameras in this TW
                 # Also maintain uniqueness within persons_present
@@ -940,7 +971,7 @@ def main():
                 for other_cam in cams_by_loc[loc_id]:
                     if other_cam == cam_id:
                         continue
-                    prev_o_v = active_vehicles.get((day, other_cam), [])
+                    prev_o_v = active_vehicles.get((date_str, other_cam), [])
                     move_v_n = int(len(prev_o_v) * move_fraction)
                     if move_v_n > 0:
                         movers_v = rng.sample(prev_o_v, min(move_v_n, len(prev_o_v)))
@@ -950,11 +981,11 @@ def main():
                                 prev_o_v.remove(m)
                             except ValueError:
                                 pass
-                        active_vehicles[(day, other_cam)] = prev_o_v
+                        active_vehicles[(date_str, other_cam)] = prev_o_v
                 # move vehicles from neighbouring locations' cameras
                 for nbr_loc in location_graph.get(loc_id, []):
                     for nbr_cam in cams_by_loc.get(nbr_loc, []):
-                        prev_n_v = active_vehicles.get((day, nbr_cam), [])
+                        prev_n_v = active_vehicles.get((date_str, nbr_cam), [])
                         move_v_n2 = int(len(prev_n_v) * move_fraction)
                         if move_v_n2 > 0:
                             movers_v2 = rng.sample(prev_n_v, min(move_v_n2, len(prev_n_v)))
@@ -964,7 +995,7 @@ def main():
                                     prev_n_v.remove(m)
                                 except ValueError:
                                     pass
-                            active_vehicles[(day, nbr_cam)] = prev_n_v
+                            active_vehicles[(date_str, nbr_cam)] = prev_n_v
                 # Remove duplicates and vehicles already assigned to other cameras in this TW
                 unique_v_present = []
                 seen_v_in_cam = set()
@@ -987,42 +1018,40 @@ def main():
                 # Number of things is proportional to number of persons present
                 exp_things = int(len(persons_present) * cfg.things_per_person_mean)
                 exp_things = clamp_int(exp_things + rng.randint(-2, 3), 0, exp_things + 10)
-                exp_things = min(exp_things, len(pool_t))
-                things_present = rng.sample(pool_t, exp_things) if exp_things > 0 else []
+                things_present = sample_excluding(rng, pool_t, list(assigned_things), exp_things)
+                for tid in things_present:
+                    assigned_things.add(tid)
 
-                # Initialize dictionaries to store detection intervals for this time window
-                person_intervals: Dict[str, Tuple[datetime, datetime]] = {}
-                thing_intervals: Dict[str, Tuple[datetime, datetime]] = {}
-                vehicle_intervals: Dict[str, Tuple[datetime, datetime]] = {}
+                presence_plan_tw: Dict[str, Tuple[str, str, str]] = {}
+                for pid in persons_present:
+                    presence_plan_tw[pid] = (loc_id, cam_id, video.video_id)
+                for tid in things_present:
+                    presence_plan_tw[tid] = (loc_id, cam_id, video.video_id)
+                for vh in vehicles_present:
+                    presence_plan_tw[vh] = (loc_id, cam_id, video.video_id)
 
-                # To encourage non zero interaction ratios, assign overlapping detection
-                # intervals to at least two persons when interactions are enabled and there
-                # are at least two persons present. This ensures a temporal overlap exists
-                # for a subset of persons, satisfying the edge generation rules.
-                overlap_start = None  # type: Optional[datetime]
-                overlap_end = None    # type: Optional[datetime]
-                if cfg.interact_ratio > 0 and len(persons_present) >= 2:
-                    tw_len_sec = int((tw_end - tw_start).total_seconds())
-                    base_dur = rng.randint(2, min(8, tw_len_sec))
-                    offset_max = tw_len_sec - base_dur
-                    base_offset = rng.randint(0, offset_max) if offset_max > 0 else 0
-                    overlap_start = tw_start + timedelta(seconds=base_offset)
-                    overlap_end = overlap_start + timedelta(seconds=base_dur)
-                    rng.shuffle(persons_present)
+                for ent_id, (ent_loc_id, ent_cam_id, ent_video_id) in presence_plan_tw.items():
+                    presence_plan[ent_id].append((tw_key, ent_loc_id, ent_cam_id, ent_video_id))
 
                 person_tw_ids: List[str] = []
-                for idx, pid in enumerate(persons_present):
+                for pid in persons_present:
+                    if pid not in presence_plan_tw:
+                        continue
                     # Build Person-TW ID
                     pid_tw = f"{pid}_TW{tw_tag}"
+                    if pid_tw in entity_tw_ids_created:
+                        raise ValueError(f"Duplicate Entity_TW generated: {pid_tw}")
                     person_tw_ids.append(pid_tw)
-                    # Assign detection interval; first two persons get the shared overlap
-                    if overlap_start is not None and idx < 2:
-                        p_det_start, p_det_end = overlap_start, overlap_end
-                    else:
-                        p_det_start, p_det_end = sample_interval_within_tw(rng, tw_start, tw_end, 2, 8)
-                    if (p_det_end - p_det_start).total_seconds() < min_duration_seconds:
-                        p_det_end = min(tw_end, p_det_start + timedelta(seconds=min_duration_seconds))
-                    person_intervals[pid_tw] = (p_det_start, p_det_end)
+                    _, ent_cam_id, ent_video_id = presence_plan_tw[pid]
+                    p_det_start, p_det_end = sample_detection_interval(
+                        rng,
+                        tw_start,
+                        tw_end,
+                        video.start_time,
+                        video.end_time,
+                        min_seconds=min_duration_seconds,
+                        max_seconds=8,
+                    )
                     # Write Person-TW node with dynamic attributes (shirt, pant, pose)
                     pose_states = ["Standing", "Walking", "Running", "Sitting"]
                     # Determine shirt and pant colors with memory
@@ -1046,17 +1075,18 @@ def main():
                     ]
                     person_tw_w.writerow(row)
                     partition_writers.writerow(part, "nodes_person_TW.csv", row)
+                    entity_tw_ids_created.add(pid_tw)
                     # Write DETECTED_IN relation with full datetime and metadata
                     det_row = [
                         pid_tw,                 # source_id
-                        video.video_id,         # destination_id
+                        ent_video_id,           # destination_id
                         "DETECTED_IN",          # type
                         p_det_start,            # ts_start (datetime)
                         p_det_end,              # ts_end (datetime)
                         date_str,               # date
                         tw_key,                 # tw_id
                         str(part),              # partition_id
-                        cam_id,                 # camera_id
+                        ent_cam_id,             # camera_id
                         loc_id,                 # location_id
                         random_confidence(rng), # confidence
                         random_bbox_json(rng),  # bbox
@@ -1064,16 +1094,34 @@ def main():
                     ]
                     rels_w.writerow(det_row)
                     partition_writers.writerow(part, "rels.csv", det_row)
+                    det_index[(tw_key, ent_video_id)].append(pid_tw)
+                    detection_count_by_entity[pid_tw] += 1
+                    det_by_entity[pid_tw] = {
+                        "ts_start": p_det_start.isoformat(sep=" "),
+                        "ts_end": p_det_end.isoformat(sep=" "),
+                        "video_id": ent_video_id,
+                        "camera_id": ent_cam_id,
+                        "location_id": loc_id,
+                    }
 
                 thing_tw_ids: List[str] = []
                 for tid in things_present:
+                    if tid not in presence_plan_tw:
+                        continue
                     tid_tw = f"{tid}_TW{tw_tag}"
+                    if tid_tw in entity_tw_ids_created:
+                        raise ValueError(f"Duplicate Entity_TW generated: {tid_tw}")
                     thing_tw_ids.append(tid_tw)
-                    # Random detection interval for thing
-                    t_det_start, t_det_end = sample_interval_within_tw(rng, tw_start, tw_end, 2, 8)
-                    if (t_det_end - t_det_start).total_seconds() < min_duration_seconds:
-                        t_det_end = min(tw_end, t_det_start + timedelta(seconds=min_duration_seconds))
-                    thing_intervals[tid_tw] = (t_det_start, t_det_end)
+                    _, ent_cam_id, ent_video_id = presence_plan_tw[tid]
+                    t_det_start, t_det_end = sample_detection_interval(
+                        rng,
+                        tw_start,
+                        tw_end,
+                        video.start_time,
+                        video.end_time,
+                        min_seconds=min_duration_seconds,
+                        max_seconds=8,
+                    )
                     # Retrieve static attributes for thing
                     ttype, size_cat, base_color = thing_attrs.get(tid, ("Bag", "Medium", "Black"))
                     state = rng.choice(["Carried", "Stationary"])
@@ -1090,17 +1138,18 @@ def main():
                     ]
                     thing_tw_w.writerow(row)
                     partition_writers.writerow(part, "nodes_thing_TW.csv", row)
+                    entity_tw_ids_created.add(tid_tw)
                     # DETECTED_IN edge
                     det_row = [
                         tid_tw,
-                        video.video_id,
+                        ent_video_id,
                         "DETECTED_IN",
                         t_det_start,
                         t_det_end,
                         date_str,
                         tw_key,
                         str(part),
-                        cam_id,
+                        ent_cam_id,
                         loc_id,
                         random_confidence(rng),
                         random_bbox_json(rng),
@@ -1108,16 +1157,34 @@ def main():
                     ]
                     rels_w.writerow(det_row)
                     partition_writers.writerow(part, "rels.csv", det_row)
+                    det_index[(tw_key, ent_video_id)].append(tid_tw)
+                    detection_count_by_entity[tid_tw] += 1
+                    det_by_entity[tid_tw] = {
+                        "ts_start": t_det_start.isoformat(sep=" "),
+                        "ts_end": t_det_end.isoformat(sep=" "),
+                        "video_id": ent_video_id,
+                        "camera_id": ent_cam_id,
+                        "location_id": loc_id,
+                    }
 
                 vehicle_tw_ids: List[str] = []
                 for vh in vehicles_present:
+                    if vh not in presence_plan_tw:
+                        continue
                     vh_tw = f"{vh}_TW{tw_tag}"
+                    if vh_tw in entity_tw_ids_created:
+                        raise ValueError(f"Duplicate Entity_TW generated: {vh_tw}")
                     vehicle_tw_ids.append(vh_tw)
-                    # Random detection interval for vehicle
-                    v_det_start, v_det_end = sample_interval_within_tw(rng, tw_start, tw_end, 2, 8)
-                    if (v_det_end - v_det_start).total_seconds() < min_duration_seconds:
-                        v_det_end = min(tw_end, v_det_start + timedelta(seconds=min_duration_seconds))
-                    vehicle_intervals[vh_tw] = (v_det_start, v_det_end)
+                    _, ent_cam_id, ent_video_id = presence_plan_tw[vh]
+                    v_det_start, v_det_end = sample_detection_interval(
+                        rng,
+                        tw_start,
+                        tw_end,
+                        video.start_time,
+                        video.end_time,
+                        min_seconds=min_duration_seconds,
+                        max_seconds=8,
+                    )
                     # Lookup vehicle static attributes
                     vtype, vcolor = vehicle_attrs.get(vh, ("Car", "White"))
                     # Determine speed and direction with memory
@@ -1156,16 +1223,17 @@ def main():
                     ]
                     vehicle_tw_w.writerow(row)
                     partition_writers.writerow(part, "nodes_vehicle_TW.csv", row)
+                    entity_tw_ids_created.add(vh_tw)
                     det_row = [
                         vh_tw,
-                        video.video_id,
+                        ent_video_id,
                         "DETECTED_IN",
                         v_det_start,
                         v_det_end,
                         date_str,
                         tw_key,
                         str(part),
-                        cam_id,
+                        ent_cam_id,
                         loc_id,
                         random_confidence(rng),
                         random_bbox_json(rng),
@@ -1173,125 +1241,49 @@ def main():
                     ]
                     rels_w.writerow(det_row)
                     partition_writers.writerow(part, "rels.csv", det_row)
+                    det_index[(tw_key, ent_video_id)].append(vh_tw)
+                    detection_count_by_entity[vh_tw] += 1
+                    det_by_entity[vh_tw] = {
+                        "ts_start": v_det_start.isoformat(sep=" "),
+                        "ts_end": v_det_end.isoformat(sep=" "),
+                        "video_id": ent_video_id,
+                        "camera_id": ent_cam_id,
+                        "location_id": loc_id,
+                    }
 
-                if person_tw_ids and thing_tw_ids:
-                    # Assign carriers for things and compute overlapping intervals
-                    for tid_tw in thing_tw_ids:
-                        carrier = rng.choice(person_tw_ids)
-                        p_start, p_end = person_intervals.get(carrier, (tw_start, tw_end))
-                        t_start, t_end = thing_intervals.get(tid_tw, (tw_start, tw_end))
-                        overlap = overlap_interval(p_start, p_end, t_start, t_end)
-                        # Only generate the relation if there is a temporal overlap
-                        if not overlap:
-                            continue
-                        rel_start, rel_end = overlap
-                        if (rel_end - rel_start).total_seconds() < min_duration_seconds:
-                            continue
-                        row = [
-                            carrier,                 # source (Person_TW)
-                            tid_tw,                  # dest (Thing_TW)
-                            "CARRIES",             # type
-                            rel_start,               # ts_start (datetime)
-                            rel_end,                 # ts_end (datetime)
-                            date_str,                # date
-                            tw_key,                  # tw_id
-                            str(part),               # partition_id
-                            "",                    # camera_id (semantic edge)
-                            "",                    # location_id (semantic edge)
-                            random_confidence(rng),  # confidence
-                            "",                    # bbox (optional)
-                            "",                    # description
-                        ]
-                        rels_w.writerow(row)
-                        partition_writers.writerow(part, "rels.csv", row)
+    for ent_tw_id in entity_tw_ids_created:
+        if detection_count_by_entity.get(ent_tw_id, 0) != 1:
+            raise ValueError(f"Entity_TW must have exactly one DETECTED_IN: {ent_tw_id}")
+    for key, ent_list in det_index.items():
+        if len(ent_list) != len(set(ent_list)):
+            raise ValueError(f"Duplicate entries found in det_index for {key}")
+    if len(det_by_entity) != len(entity_tw_ids_created):
+        raise ValueError("det_by_entity is missing entries for some Entity_TW IDs")
 
-                if person_tw_ids and vehicle_tw_ids:
-                    for vh_tw in vehicle_tw_ids:
-                        if rng.random() <= cfg.uses_ratio_per_vehicle:
-                            k = clamp_int(rng.randint(cfg.uses_persons_min, cfg.uses_persons_max), 1, min(len(person_tw_ids), 10))
-                            for u in rng.sample(person_tw_ids, k):
-                                p_start, p_end = person_intervals.get(u, (tw_start, tw_end))
-                                v_start, v_end = vehicle_intervals.get(vh_tw, (tw_start, tw_end))
-                                overlap = overlap_interval(p_start, p_end, v_start, v_end)
-                                # Only generate the relation if there is a temporal overlap
-                                if not overlap:
-                                    continue
-                                rel_start, rel_end = overlap
-                                if (rel_end - rel_start).total_seconds() < min_duration_seconds:
-                                    continue
-                                row = [
-                                    u,
-                                    vh_tw,
-                                    "USES",
-                                    rel_start,
-                                    rel_end,
-                                    date_str,
-                                    tw_key,
-                                    str(part),
-                                    "",                    # camera_id
-                                    "",                    # location_id
-                                    random_confidence(rng),
-                                    "",                    # bbox
-                                    "",                    # description
-                                ]
-                                rels_w.writerow(row)
-                                partition_writers.writerow(part, "rels.csv", row)
-                # Add INTERACTS_WITH relationships between persons in this TW
-                if len(person_tw_ids) >= 2 and cfg.interact_ratio > 0:
-                    # Use interact ratio directly (not scaled by person multiplier)
-                    curr_ir = cfg.interact_ratio
-                    # Cap ratio to 1.0
-                    if curr_ir > 1.0:
-                        curr_ir = 1.0
-                    n = len(person_tw_ids)
-                    # Total possible unique pairs among persons in this time window
-                    total_pairs = n * (n - 1) // 2
-                    # Compute desired number of interacting pairs based on ratio
-                    desired_pairs = int(total_pairs * curr_ir)
-                    # Ensure at least interact_cluster_min pairs
-                    if desired_pairs < cfg.interact_cluster_min:
-                        desired_pairs = cfg.interact_cluster_min
-                    # Clamp to total possible pairs (no upper cluster limit)
-                    if desired_pairs > total_pairs:
-                        desired_pairs = total_pairs
-                    # Only proceed if we need at least one interaction
-                    if desired_pairs > 0:
-                        seen_pairs = set()
-                        attempts = 0
-                        max_attempts = total_pairs * 5 if total_pairs > 0 else 0
-                        while len(seen_pairs) < desired_pairs and attempts < max_attempts:
-                            attempts += 1
-                            a, b = rng.sample(person_tw_ids, 2)
-                            pair = tuple(sorted((a, b)))
-                            if pair in seen_pairs:
-                                continue
-                            a_start, a_end = person_intervals.get(pair[0], (tw_start, tw_end))
-                            b_start, b_end = person_intervals.get(pair[1], (tw_start, tw_end))
-                            overlap = overlap_interval(a_start, a_end, b_start, b_end)
-                            # Only create relation if there is a temporal overlap
-                            if not overlap:
-                                continue
-                            rel_start, rel_end = overlap
-                            if (rel_end - rel_start).total_seconds() < min_duration_seconds:
-                                continue
-                            row = [
-                                pair[0],
-                                pair[1],
-                                "INTERACTS_WITH",
-                                rel_start,
-                                rel_end,
-                                date_str,
-                                tw_key,
-                                str(part),
-                                "",                    # camera_id
-                                "",                    # location_id
-                                random_confidence(rng),
-                                "",                    # bbox
-                                "",                    # description
-                            ]
-                            rels_w.writerow(row)
-                            partition_writers.writerow(part, "rels.csv", row)
-                            seen_pairs.add(pair)
+    det_index_rows = []
+    for (tw_id, video_id), ent_list in sorted(det_index.items()):
+        for ent_tw_id in ent_list:
+            det_index_rows.append([tw_id, video_id, ent_tw_id])
+    write_csv(
+        os.path.join(args.out, "detection_index_by_tw_video.csv"),
+        ["tw_id", "video_id", "entity_tw_id"],
+        det_index_rows,
+    )
+    det_by_entity_rows = []
+    for ent_tw_id, det in sorted(det_by_entity.items()):
+        det_by_entity_rows.append([
+            ent_tw_id,
+            det["ts_start"],
+            det["ts_end"],
+            det["video_id"],
+            det["camera_id"],
+            det["location_id"],
+        ])
+    write_csv(
+        os.path.join(args.out, "detection_index_by_entity.csv"),
+        ["entity_tw_id", "ts_start", "ts_end", "video_id", "camera_id", "location_id"],
+        det_by_entity_rows,
+    )
 
     # Close all CSV writers to flush buffered rows
     person_tw_w.close()
