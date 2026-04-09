@@ -1343,6 +1343,13 @@ def main():
             "location_id": det["location_id"],
         }
 
+    def get_det_datetime(key: str, field: str) -> datetime:
+        """Helper to safely retrieve and cast datetime from det_cache."""
+        val = det_cache[key][field]
+        if isinstance(val, datetime):
+            return val
+        raise TypeError(f"Expected datetime for {key}[{field}], got {type(val)}")
+
     for (tw_id, video_id), entity_list in sorted(det_index.items()):
         persons = sorted([eid for eid in entity_list if eid.startswith("P")])
         things = sorted([eid for eid in entity_list if eid.startswith("T")])
@@ -1357,7 +1364,7 @@ def main():
             for j in range(i + 1, len(persons)):  # ensures A.id < B.id
                 b = persons[j]
                 b_det = det_cache[b]
-                ov = overlap_interval(a_det["ts_start"], a_det["ts_end"], b_det["ts_start"], b_det["ts_end"])
+                ov = overlap_interval(get_det_datetime(a, "ts_start"), get_det_datetime(a, "ts_end"), get_det_datetime(b, "ts_start"), get_det_datetime(b, "ts_end"))
                 if ov is None:
                     continue
                 if person_interact_count[a] >= person_interact_cap[a] or person_interact_count[b] >= person_interact_cap[b]:
@@ -1401,7 +1408,7 @@ def main():
             candidates = []
             for tid in things:
                 t_det = det_cache[tid]
-                ov = overlap_interval(p_det["ts_start"], p_det["ts_end"], t_det["ts_start"], t_det["ts_end"])
+                ov = overlap_interval(get_det_datetime(pid, "ts_start"), get_det_datetime(pid, "ts_end"), get_det_datetime(tid, "ts_start"), get_det_datetime(tid, "ts_end"))
                 if ov is None:
                     continue
                 t_global = tid.split("_TW", 1)[0]
@@ -1445,7 +1452,7 @@ def main():
             vehicle_candidates = []
             for vid in vehicles:
                 v_det = det_cache[vid]
-                ov = overlap_interval(p_det["ts_start"], p_det["ts_end"], v_det["ts_start"], v_det["ts_end"])
+                ov = overlap_interval(get_det_datetime(pid, "ts_start"), get_det_datetime(pid, "ts_end"), get_det_datetime(vid, "ts_start"), get_det_datetime(vid, "ts_end"))
                 if ov is None:
                     continue
                 vehicle_candidates.append((vid, ov))
