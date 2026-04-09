@@ -1330,6 +1330,151 @@ def main():
     if len(det_by_entity) != len(entity_tw_ids_created):
         raise ValueError("det_by_entity is missing entries for some Entity_TW IDs")
 
+    # Layer 7: relation generation strictly from Detection Index (tw_id, video_id)
+    preferred_carry_types = {"Bag", "Backpack", "Handbag"}
+    relation_edge_keys = set()
+    det_cache: Dict[str, Dict[str, object]] = {}
+    for ent_tw_id, det in det_by_entity.items():
+        det_cache[ent_tw_id] = {
+            "ts_start": datetime.fromisoformat(det["ts_start"]),
+            "ts_end": datetime.fromisoformat(det["ts_end"]),
+            "video_id": det["video_id"],
+            "camera_id": det["camera_id"],
+            "location_id": det["location_id"],
+        }
+
+    for (tw_id, video_id), entity_list in sorted(det_index.items()):
+        persons = sorted([eid for eid in entity_list if eid.startswith("P")])
+        things = sorted([eid for eid in entity_list if eid.startswith("T")])
+        vehicles = sorted([eid for eid in entity_list if eid.startswith("V")])
+
+        # INTERACTS_WITH (Person <-> Person), undirected via two directed rows.
+        person_interact_count = defaultdict(int)
+        person_interact_cap = {pid: rng.randint(3, 5) for pid in persons}
+        for i in range(len(persons)):
+            a = persons[i]
+            a_det = det_cache[a]
+            for j in range(i + 1, len(persons)):  # ensures A.id < B.id
+                b = persons[j]
+                b_det = det_cache[b]
+                ov = overlap_interval(a_det["ts_start"], a_det["ts_end"], b_det["ts_start"], b_det["ts_end"])
+                if ov is None:
+                    continue
+                if person_interact_count[a] >= person_interact_cap[a] or person_interact_count[b] >= person_interact_cap[b]:
+                    continue
+                loc_id = str(a_det["location_id"])
+                loc_type = loc_to_type.get(loc_id, "Outdoor")
+                p_interact = dens_map.get(loc_type, dens_map["Outdoor"]).interact_ratio
+                if rng.random() > p_interact:
+                    continue
+                ts_start, ts_end = ov
+                for src, dst in ((a, b), (b, a)):
+                    edge_key = (src, dst, "INTERACTS_WITH", ts_start.isoformat(sep=" "), ts_end.isoformat(sep=" "))
+                    if edge_key in relation_edge_keys:
+                        continue
+                    relation_edge_keys.add(edge_key)
+                    src_det = det_cache[src]
+                    part = loc_to_partition[str(src_det["location_id"])]
+                    row = [
+                        src,
+                        dst,
+                        "INTERACTS_WITH",
+                        ts_start,
+                        ts_end,
+                        ts_start.strftime("%Y-%m-%d"),
+                        tw_id,
+                        str(part),
+                        src_det["camera_id"],
+                        src_det["location_id"],
+                        "",
+                        "",
+                        "",
+                    ]
+                    rels_w.writerow(row)
+                    partition_writers.writerow(part, "rels.csv", row)
+                person_interact_count[a] += 1
+                person_interact_count[b] += 1
+
+        # CARRIES (Person -> Thing), overlap-only and no duplicates.
+        for pid in persons:
+            p_det = det_cache[pid]
+            candidates = []
+            for tid in things:
+                t_det = det_cache[tid]
+                ov = overlap_interval(p_det["ts_start"], p_det["ts_end"], t_det["ts_start"], t_det["ts_end"])
+                if ov is None:
+                    continue
+                t_global = tid.split("_TW", 1)[0]
+                t_type = thing_attrs.get(t_global, ("Bag", "Medium", "Black"))[0]
+                preferred = t_type in preferred_carry_types
+                candidates.append((tid, ov, preferred))
+            if not candidates:
+                continue
+            candidates.sort(key=lambda x: (not x[2], x[0]))
+            k = rng.randint(0, min(2, len(candidates)))
+            for tid, (ts_start, ts_end), _pref in candidates[:k]:
+                edge_key = (pid, tid, "CARRIES", ts_start.isoformat(sep=" "), ts_end.isoformat(sep=" "))
+                if edge_key in relation_edge_keys:
+                    continue
+                relation_edge_keys.add(edge_key)
+                part = loc_to_partition[str(p_det["location_id"])]
+                row = [
+                    pid,
+                    tid,
+                    "CARRIES",
+                    ts_start,
+                    ts_end,
+                    ts_start.strftime("%Y-%m-%d"),
+                    tw_id,
+                    str(part),
+                    p_det["camera_id"],
+                    p_det["location_id"],
+                    "",
+                    "",
+                    "",
+                ]
+                rels_w.writerow(row)
+                partition_writers.writerow(part, "rels.csv", row)
+
+        # USES (Person -> Vehicle), overlap-only, outdoor-type locations only.
+        for pid in persons:
+            p_det = det_cache[pid]
+            loc_type = loc_to_type.get(str(p_det["location_id"]), "Outdoor")
+            if loc_type not in OUTDOOR_LOC_TYPES:
+                continue
+            vehicle_candidates = []
+            for vid in vehicles:
+                v_det = det_cache[vid]
+                ov = overlap_interval(p_det["ts_start"], p_det["ts_end"], v_det["ts_start"], v_det["ts_end"])
+                if ov is None:
+                    continue
+                vehicle_candidates.append((vid, ov))
+            if not vehicle_candidates:
+                continue
+            chosen_vid, (ts_start, ts_end) = rng.choice(vehicle_candidates)
+            edge_key = (pid, chosen_vid, "USES", ts_start.isoformat(sep=" "), ts_end.isoformat(sep=" "))
+            if edge_key in relation_edge_keys:
+                continue
+            relation_edge_keys.add(edge_key)
+            part = loc_to_partition[str(p_det["location_id"])]
+            row = [
+                pid,
+                chosen_vid,
+                "USES",
+                ts_start,
+                ts_end,
+                ts_start.strftime("%Y-%m-%d"),
+                tw_id,
+                str(part),
+                p_det["camera_id"],
+                p_det["location_id"],
+                "",
+                "",
+                "",
+            ]
+            rels_w.writerow(row)
+            partition_writers.writerow(part, "rels.csv", row)
+
     det_index_rows = []
     for (tw_id, video_id), ent_list in sorted(det_index.items()):
         for ent_tw_id in ent_list:
