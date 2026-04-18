@@ -1642,7 +1642,11 @@ def main():
                     continue
                 loc_id = str(a_det["location_id"])
                 loc_type = loc_to_type.get(loc_id, "Outdoor")
-                p_interact = dens_map.get(loc_type, dens_map["Outdoor"]).interact_ratio
+                p_interact = clamp_int(
+                    int(round(dens_map.get(loc_type, dens_map["Outdoor"]).interact_ratio * 100)),
+                    10,
+                    30,
+                ) / 100.0
                 if rng.random() > p_interact:
                     continue
                 ts_start, ts_end = ov
@@ -1689,7 +1693,7 @@ def main():
             if not candidates:
                 continue
             candidates.sort(key=lambda x: (not x[2], x[0]))
-            k = rng.randint(0, min(2, len(candidates)))
+            k = rng.randint(1, min(2, len(candidates)))
             for tid, (ts_start, ts_end), _pref in candidates[:k]:
                 edge_key = (pid, tid, "CARRIES", ts_start.isoformat(sep=" "), ts_end.isoformat(sep=" "))
                 if edge_key in relation_edge_keys:
