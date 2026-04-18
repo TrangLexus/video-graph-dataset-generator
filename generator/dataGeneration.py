@@ -453,6 +453,8 @@ class PartitionWriters:
         elif filename in {"nodes_person_TW.csv", "nodes_thing_TW.csv", "nodes_vehicle_TW.csv"}:
             self._register_node_partition(str(row[0]), partition_id)
         elif filename == "rels.csv":
+            # Keep by_partition/partition_xxxx self-contained: write edge only when
+            # both endpoints are already registered to the same partition.
             src_id = str(row[0])
             dst_id = str(row[1])
             src_part = self._node_partition.get(src_id)
@@ -680,11 +682,24 @@ def write_layer8_partitions_and_validate(out_root: str, loc_to_type: Dict[str, s
 
 
 def main():
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(
+        description=(
+            "Generate synthetic video-graph CSVs with partition outputs. "
+            "Each partition may contain multiple locations."
+        )
+    )
     ap.add_argument("--out", required=True)
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--num_locations", type=int, default=10)
-    ap.add_argument("--num_partitions", type=int, default=10)
+    ap.add_argument(
+        "--num_partitions",
+        type=int,
+        default=10,
+        help=(
+            "Number of partitions to create. Locations are distributed across partitions "
+            "as evenly as possible, so each partition can contain multiple locations."
+        ),
+    )
     ap.add_argument("--cameras_per_location", type=int, default=3)
     ap.add_argument("--persons_pool", type=int, default=2000)
     ap.add_argument("--things_pool", type=int, default=800)
@@ -825,6 +840,8 @@ def main():
         if loc_type not in ALLOWED_LOC_TYPES:
             raise ValueError(f"Invalid loc_type={loc_type} for loc_id={loc_id}")
     sorted_loc_ids = sorted(loc_id for (loc_id, _name, _loc_type) in locations)
+    # Partition assignment is balanced by contiguous sorted location slices.
+    # When num_partitions < num_locations, each partition receives multiple locations.
     q, r = divmod(len(sorted_loc_ids), args.num_partitions)
     partition_to_locs: Dict[int, List[str]] = {}
     loc_to_partition: Dict[str, int] = {}
@@ -985,7 +1002,8 @@ def main():
         for i in range(len(part_locs) - 1):
             loc1 = part_locs[i]
             loc2 = part_locs[i + 1]
-            # NEAR_BY is structural: no timestamps, camera/location context
+            # NEAR_BY edges are generated only between neighboring locations inside
+            # the same partition to preserve partition-local structural context.
             row = [
                 loc1,
                 loc2,
