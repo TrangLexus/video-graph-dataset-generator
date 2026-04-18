@@ -1626,79 +1626,135 @@ def main():
         things = sorted([eid for eid in entity_list if eid.startswith("T")])
         vehicles = sorted([eid for eid in entity_list if eid.startswith("V")])
 
-        interacts_count = 0
-        carries_count = 0
-        uses_count = 0
-        interacts_cap = len(persons) * 2
-        carries_cap = len(persons)
-        uses_cap = len(persons) // 2
+        num_persons = len(persons)
+        interacts_cap = max(0, num_persons // 2)
+        carries_cap = max(0, int(num_persons * 0.4))
+        uses_cap = max(0, int(num_persons * 0.15))
+        if vehicles and num_persons > 0 and uses_cap == 0:
+            uses_cap = 1
 
-        # INTERACTS_WITH (Person <-> Person), sampled from overlap candidates only.
+        # INTERACTS_WITH (Person <-> Person), sparse person-centric sampling + hard cap.
+        interacts_candidates: List[Tuple[str, str, datetime, datetime]] = []
+        interact_pairs_seen = set()
+        interact_person_degree = defaultdict(int)
+        p_interact_base = 0.24
+        if num_persons <= 2:
+            p_interact = 0.10
+            max_pairs_per_person = 1
+        elif num_persons <= 5:
+            p_interact = p_interact_base
+            max_pairs_per_person = 1
+        else:
+            p_interact = max(0.05, p_interact_base * (5.0 / float(num_persons)))
+            max_pairs_per_person = 2
         for a in persons:
-            if interacts_count >= interacts_cap:
-                break
-            candidates = []
+            if interact_person_degree[a] >= max_pairs_per_person:
+                continue
+            if rng.random() > p_interact:
+                continue
+            overlap_candidates = []
             for b in persons:
                 if b == a:
+                    continue
+                if interact_person_degree[b] >= max_pairs_per_person:
                     continue
                 ov = overlap_interval(get_det_datetime(a, "ts_start"), get_det_datetime(a, "ts_end"), get_det_datetime(b, "ts_start"), get_det_datetime(b, "ts_end"))
                 if ov is None:
                     continue
-                candidates.append(b)
-            if not candidates:
+                pair_key = tuple(sorted((a, b)))
+                if pair_key in interact_pairs_seen:
+                    continue
+                overlap_candidates.append((b, ov))
+            if not overlap_candidates:
                 continue
-            k = rng.randint(1, min(3, len(candidates)))
-            for b in rng.sample(candidates, k):
-                if interacts_count >= interacts_cap:
-                    break
-                ts_start = max(get_det_datetime(a, "ts_start"), get_det_datetime(b, "ts_start"))
-                ts_end = min(get_det_datetime(a, "ts_end"), get_det_datetime(b, "ts_end"))
-                for src, dst in ((a, b), (b, a)):
-                    if interacts_count >= interacts_cap:
-                        break
-                    edge_key = (src, dst, ts_start.isoformat(sep=" "), ts_end.isoformat(sep=" "), "INTERACTS_WITH")
-                    if edge_key in relation_edge_keys:
-                        continue
-                    relation_edge_keys.add(edge_key)
-                    src_det = det_cache[src]
-                    part = loc_to_partition[str(src_det["location_id"])]
-                    row = [
-                        src,
-                        dst,
-                        "INTERACTS_WITH",
-                        ts_start,
-                        ts_end,
-                        ts_start.strftime("%Y-%m-%d"),
-                        tw_id,
-                        str(part),
-                        src_det["camera_id"],
-                        src_det["location_id"],
-                        "",
-                        "",
-                        "",
-                    ]
-                    rels_w.writerow(row)
-                    partition_writers.writerow(part, "rels.csv", row)
-                    interacts_count += 1
+            sample_k = 1
+            if num_persons > 6 and len(overlap_candidates) > 1 and rng.random() < 0.20:
+                sample_k = 2
+            chosen = rng.sample(overlap_candidates, min(sample_k, len(overlap_candidates)))
+            for b, (ts_start, ts_end) in chosen:
+                pair_key = tuple(sorted((a, b)))
+                if pair_key in interact_pairs_seen:
+                    continue
+                if interact_person_degree[a] >= max_pairs_per_person or interact_person_degree[b] >= max_pairs_per_person:
+                    continue
+                interact_pairs_seen.add(pair_key)
+                interact_person_degree[a] += 1
+                interact_person_degree[b] += 1
+                interacts_candidates.append((a, b, ts_start, ts_end))
+        if len(interacts_candidates) > interacts_cap:
+            interacts_candidates = rng.sample(interacts_candidates, interacts_cap)
+        for a, b, ts_start, ts_end in interacts_candidates:
+            for src, dst in ((a, b), (b, a)):
+                edge_key = (src, dst, ts_start.isoformat(sep=" "), ts_end.isoformat(sep=" "), "INTERACTS_WITH")
+                if edge_key in relation_edge_keys:
+                    continue
+                relation_edge_keys.add(edge_key)
+                src_det = det_cache[src]
+                part = loc_to_partition[str(src_det["location_id"])]
+                row = [
+                    src,
+                    dst,
+                    "INTERACTS_WITH",
+                    ts_start,
+                    ts_end,
+                    ts_start.strftime("%Y-%m-%d"),
+                    tw_id,
+                    str(part),
+                    src_det["camera_id"],
+                    src_det["location_id"],
+                    "",
+                    "",
+                    "",
+                ]
+                rels_w.writerow(row)
+                partition_writers.writerow(part, "rels.csv", row)
 
-        # CARRIES (Person -> Thing), overlap-only and capped to one sampled thing per person.
+        # CARRIES (Person -> Thing), selective, type-aware, max one thing per person + hard cap.
+        carries_candidates: List[Tuple[str, str, datetime, datetime]] = []
+        used_things = set()
+        p_carry = 0.45
+        carry_type_weights = {
+            "Backpack": 1.0,
+            "Bag": 0.9,
+            "Handbag": 0.85,
+            "Suitcase": 0.35,
+            "Box": 0.25,
+        }
         for pid in persons:
-            if carries_count >= carries_cap:
-                break
-            p_det = det_cache[pid]
-            candidates = []
+            if rng.random() > p_carry:
+                continue
+            weighted_candidates = []
             for tid in things:
+                if tid in used_things:
+                    continue
                 ov = overlap_interval(get_det_datetime(pid, "ts_start"), get_det_datetime(pid, "ts_end"), get_det_datetime(tid, "ts_start"), get_det_datetime(tid, "ts_end"))
                 if ov is None:
                     continue
-                candidates.append((tid, ov))
-            if not candidates:
+                base_tid = tid.split("_TW", 1)[0]
+                ttype = thing_attrs.get(base_tid, ("Bag", "Medium", "Black"))[0]
+                type_w = carry_type_weights.get(ttype, 0.15)
+                if ttype.lower() in {"phone", "cellphone", "smartphone"}:
+                    type_w *= 0.2
+                weighted_candidates.append((tid, ov, type_w))
+            if not weighted_candidates:
                 continue
-            tid, (ts_start, ts_end) = rng.choice(candidates)
+            chosen_tid, chosen_ov, _ = rng.choices(
+                weighted_candidates,
+                weights=[w for _, _, w in weighted_candidates],
+                k=1,
+            )[0]
+            used_things.add(chosen_tid)
+            carries_candidates.append((pid, chosen_tid, chosen_ov[0], chosen_ov[1]))
+        if len(carries_candidates) > carries_cap:
+            carries_candidates = rng.sample(carries_candidates, carries_cap)
+        carries_seen = set()
+        for pid, tid, ts_start, ts_end in carries_candidates:
             edge_key = (pid, tid, ts_start.isoformat(sep=" "), ts_end.isoformat(sep=" "), "CARRIES")
-            if edge_key in relation_edge_keys:
+            if edge_key in relation_edge_keys or edge_key in carries_seen:
                 continue
+            carries_seen.add(edge_key)
             relation_edge_keys.add(edge_key)
+            p_det = det_cache[pid]
             part = loc_to_partition[str(p_det["location_id"])]
             row = [
                 pid,
@@ -1717,19 +1773,20 @@ def main():
             ]
             rels_w.writerow(row)
             partition_writers.writerow(part, "rels.csv", row)
-            carries_count += 1
 
-        # USES (Person -> Vehicle), overlap-only, outdoor-type locations only.
+        # USES (Person -> Vehicle), low-probability, context-sensitive and hard-capped.
+        uses_candidates: List[Tuple[str, str, datetime, datetime]] = []
+        p_use_base = 0.16
+        p_use = p_use_base * (0.75 if num_persons > 5 else 1.0)
         for pid in persons:
-            if uses_count >= uses_cap:
-                break
+            if rng.random() > p_use:
+                continue
             p_det = det_cache[pid]
             loc_type = loc_to_type.get(str(p_det["location_id"]), "Outdoor")
             if loc_type not in OUTDOOR_LOC_TYPES:
                 continue
             vehicle_candidates = []
             for vid in vehicles:
-                v_det = det_cache[vid]
                 ov = overlap_interval(get_det_datetime(pid, "ts_start"), get_det_datetime(pid, "ts_end"), get_det_datetime(vid, "ts_start"), get_det_datetime(vid, "ts_end"))
                 if ov is None:
                     continue
@@ -1737,10 +1794,17 @@ def main():
             if not vehicle_candidates:
                 continue
             chosen_vid, (ts_start, ts_end) = rng.choice(vehicle_candidates)
+            uses_candidates.append((pid, chosen_vid, ts_start, ts_end))
+        if len(uses_candidates) > uses_cap:
+            uses_candidates = rng.sample(uses_candidates, uses_cap)
+        uses_seen = set()
+        for pid, chosen_vid, ts_start, ts_end in uses_candidates:
             edge_key = (pid, chosen_vid, ts_start.isoformat(sep=" "), ts_end.isoformat(sep=" "), "USES")
-            if edge_key in relation_edge_keys:
+            if edge_key in relation_edge_keys or edge_key in uses_seen:
                 continue
+            uses_seen.add(edge_key)
             relation_edge_keys.add(edge_key)
+            p_det = det_cache[pid]
             part = loc_to_partition[str(p_det["location_id"])]
             row = [
                 pid,
@@ -1759,7 +1823,6 @@ def main():
             ]
             rels_w.writerow(row)
             partition_writers.writerow(part, "rels.csv", row)
-            uses_count += 1
 
     det_index_rows = []
     for (tw_id, video_id), ent_list in sorted(det_index.items()):
