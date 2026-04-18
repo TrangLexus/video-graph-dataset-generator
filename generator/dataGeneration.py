@@ -408,6 +408,7 @@ class PartitionWriters:
         self.by_partition_root = os.path.join(out_root, "by_partition")
         ensure_dir(self.by_partition_root)
         self._writers: Dict[int, Dict[str, CsvAppender]] = {}
+        self._node_partition: Dict[str, int] = {}
 
     def _partition_path(self, partition_id: int) -> str:
         return os.path.join(self.by_partition_root, partition_dir_name(partition_id))
@@ -426,6 +427,16 @@ class PartitionWriters:
         write_csv(os.path.join(pdir, "nodes_camera.csv"), self.headers["nodes_camera.csv"], camera_rows)
         write_csv(os.path.join(pdir, "partitions.csv"), self.headers["partitions.csv"], partition_rows)
         write_csv(os.path.join(pdir, "nodes_timewindow.csv"), self.headers["nodes_timewindow.csv"], timewindow_rows)
+        for loc in loc_rows:
+            self._register_node_partition(loc[0], partition_id)
+        for cam in camera_rows:
+            self._register_node_partition(cam[0], partition_id)
+
+    def _register_node_partition(self, node_id: str, partition_id: int) -> None:
+        prev = self._node_partition.get(node_id)
+        if prev is not None and prev != partition_id:
+            raise ValueError(f"Node assigned to multiple partitions: node_id={node_id}, prev={prev}, curr={partition_id}")
+        self._node_partition[node_id] = partition_id
 
     def get_partition_writer(self, partition_id: int, filename: str) -> CsvAppender:
         if partition_id not in self._writers:
@@ -437,6 +448,17 @@ class PartitionWriters:
         return self._writers[partition_id][filename]
 
     def writerow(self, partition_id: int, filename: str, row: List[str]) -> None:
+        if filename == "nodes_video.csv":
+            self._register_node_partition(str(row[0]), partition_id)
+        elif filename in {"nodes_person_TW.csv", "nodes_thing_TW.csv", "nodes_vehicle_TW.csv"}:
+            self._register_node_partition(str(row[0]), partition_id)
+        elif filename == "rels.csv":
+            src_id = str(row[0])
+            dst_id = str(row[1])
+            src_part = self._node_partition.get(src_id)
+            dst_part = self._node_partition.get(dst_id)
+            if src_part != partition_id or dst_part != partition_id:
+                return
         self.get_partition_writer(partition_id, filename).writerow(row)
 
     def close(self) -> None:
