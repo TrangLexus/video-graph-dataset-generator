@@ -283,6 +283,11 @@ def validate_partition_and_uniqueness(
             )
 
     entity_files = ["nodes_person_TW.csv", "nodes_thing_TW.csv", "nodes_vehicle_TW.csv"]
+    entity_id_col_map = {
+        "nodes_person_TW.csv": "pid_tw",
+        "nodes_thing_TW.csv": "tid_tw",
+        "nodes_vehicle_TW.csv": "vid_tw",
+    }
     seen_entity_ids: Set[str] = set()
     seen_global_tw: Set[Tuple[str, str]] = set()
     entity_partition_declared: Dict[str, str] = {}
@@ -292,7 +297,8 @@ def validate_partition_and_uniqueness(
             continue
         for i, row in enumerate(dfs[fname].itertuples(index=False), start=1):
             line = i + 1
-            entity_tw_id = str(row.entity_tw_id)
+            entity_id_col = entity_id_col_map[fname]
+            entity_tw_id = str(getattr(row, entity_id_col))
             id_global = str(row.id_global)
             tw_id = str(row.tw_id)
             part = str(row.partition_id)
