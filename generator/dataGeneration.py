@@ -415,15 +415,16 @@ class PartitionWriters:
     def init_partition_static_files(
         self,
         partition_id: int,
-        loc_row: List[str],
+        loc_rows: List[List[str]],
         camera_rows: List[List[str]],
+        partition_rows: List[List[str]],
         timewindow_rows: List[List[str]],
     ) -> None:
         pdir = self._partition_path(partition_id)
         ensure_dir(pdir)
-        write_csv(os.path.join(pdir, "nodes_location.csv"), self.headers["nodes_location.csv"], [loc_row])
+        write_csv(os.path.join(pdir, "nodes_location.csv"), self.headers["nodes_location.csv"], loc_rows)
         write_csv(os.path.join(pdir, "nodes_camera.csv"), self.headers["nodes_camera.csv"], camera_rows)
-        write_csv(os.path.join(pdir, "partitions.csv"), self.headers["partitions.csv"], [[str(partition_id), loc_row[0]]])
+        write_csv(os.path.join(pdir, "partitions.csv"), self.headers["partitions.csv"], partition_rows)
         write_csv(os.path.join(pdir, "nodes_timewindow.csv"), self.headers["nodes_timewindow.csv"], timewindow_rows)
 
     def get_partition_writer(self, partition_id: int, filename: str) -> CsvAppender:
@@ -661,6 +662,7 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--num_locations", type=int, default=10)
+    ap.add_argument("--num_partitions", type=int, default=10)
     ap.add_argument("--cameras_per_location", type=int, default=3)
     ap.add_argument("--persons_pool", type=int, default=2000)
     ap.add_argument("--things_pool", type=int, default=800)
@@ -698,6 +700,10 @@ def main():
         raise ValueError("num_locations must be > 0")
     if args.cameras_per_location <= 0:
         raise ValueError("cameras_per_location must be > 0")
+    if args.num_partitions <= 0:
+        raise ValueError("num_partitions must be > 0")
+    if args.num_partitions > args.num_locations:
+        raise ValueError("num_partitions must be <= num_locations")
     if args.persons_pool <= 0:
         raise ValueError("persons_pool must be > 0")
     if args.things_pool < 0:
@@ -796,7 +802,18 @@ def main():
     for loc_id, _loc_name, loc_type in locations:
         if loc_type not in ALLOWED_LOC_TYPES:
             raise ValueError(f"Invalid loc_type={loc_type} for loc_id={loc_id}")
-    loc_to_partition = {loc_id: i + 1 for i, (loc_id, _, _) in enumerate(locations)}
+    sorted_loc_ids = sorted(loc_id for (loc_id, _name, _loc_type) in locations)
+    q, r = divmod(len(sorted_loc_ids), args.num_partitions)
+    partition_to_locs: Dict[int, List[str]] = {}
+    loc_to_partition: Dict[str, int] = {}
+    cursor = 0
+    for partition_id in range(1, args.num_partitions + 1):
+        bucket_size = q + (1 if partition_id <= r else 0)
+        bucket = sorted_loc_ids[cursor:cursor + bucket_size]
+        partition_to_locs[partition_id] = bucket
+        for loc_id in bucket:
+            loc_to_partition[loc_id] = partition_id
+        cursor += bucket_size
     loc_to_type = {loc_id: loc_type for (loc_id, _, loc_type) in locations}
     loc_rows_by_id = {loc_id: [loc_id, name, loc_type] for (loc_id, name, loc_type) in locations}
 
@@ -894,12 +911,13 @@ def main():
     write_csv(os.path.join(args.out, "nodes_timewindow.csv"), headers["nodes_timewindow.csv"], timewindow_rows)
 
     partition_writers = PartitionWriters(args.out, headers)
-    for loc_id, _name, _loc_type in locations:
-        part = loc_to_partition[loc_id]
+    for part in range(1, args.num_partitions + 1):
+        part_locs = partition_to_locs[part]
         partition_writers.init_partition_static_files(
             partition_id=part,
-            loc_row=loc_rows_by_id[loc_id],
+            loc_rows=[loc_rows_by_id[loc_id] for loc_id in part_locs],
             camera_rows=cameras_by_partition.get(part, []),
+            partition_rows=[[str(part), loc_id] for loc_id in part_locs],
             timewindow_rows=timewindow_rows,
         )
 
