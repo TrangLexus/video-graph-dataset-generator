@@ -240,6 +240,199 @@ def validate_edges(rels: pd.DataFrame,
     return detection_info
 
 
+def validate_partition_and_uniqueness(
+    dfs: Dict[str, pd.DataFrame],
+    rels: pd.DataFrame,
+    video_map: Dict[str, VideoInfo],
+    detection_info: Dict[str, DetectionInfo],
+    issues: IssueCollector,
+):
+    partition_by_loc: Dict[str, str] = {
+        str(r.loc_id): str(r.partition_id)
+        for r in dfs["partitions.csv"].itertuples(index=False)
+    }
+    camera_partition: Dict[str, str] = {}
+
+    for i, row in rels.iterrows():
+        if row["type"] != "LOCATED_AT":
+            continue
+        line = i + 2
+        camera_id = str(row["source_id"])
+        loc_id = str(row["destination_id"])
+        loc_partition = partition_by_loc.get(loc_id)
+        if not loc_partition:
+            issues.error(
+                f"LOCATED_AT references unknown location at line {line}: {loc_id}",
+                "relation",
+            )
+            continue
+        prev = camera_partition.get(camera_id)
+        if prev and prev != loc_partition:
+            issues.error(
+                f"Camera in multiple partitions via LOCATED_AT at line {line}: {camera_id}",
+                "relation",
+            )
+        camera_partition[camera_id] = loc_partition
+
+    for vid, video in video_map.items():
+        cam_partition = camera_partition.get(video.camera_id)
+        if cam_partition and str(video.partition_id) != cam_partition:
+            issues.error(
+                f"partition(Location)->partition(Camera)->partition(Video) mismatch for video {vid}",
+                "relation",
+            )
+
+    entity_files = ["nodes_person_TW.csv", "nodes_thing_TW.csv", "nodes_vehicle_TW.csv"]
+    seen_entity_ids: Set[str] = set()
+    seen_global_tw: Set[Tuple[str, str]] = set()
+    entity_partition_declared: Dict[str, str] = {}
+
+    for fname in entity_files:
+        if fname not in dfs:
+            continue
+        for i, row in enumerate(dfs[fname].itertuples(index=False), start=1):
+            line = i + 1
+            entity_tw_id = str(row.entity_tw_id)
+            id_global = str(row.id_global)
+            tw_id = str(row.tw_id)
+            part = str(row.partition_id)
+
+            if entity_tw_id in seen_entity_ids:
+                issues.error(f"Duplicate Entity_TW ID in {fname} line {line}: {entity_tw_id}", "schema")
+            seen_entity_ids.add(entity_tw_id)
+
+            pair = (id_global, tw_id)
+            if pair in seen_global_tw:
+                issues.error(f"Duplicate (id_global, tw_id) in {fname} line {line}: {pair}", "schema")
+            seen_global_tw.add(pair)
+            entity_partition_declared[entity_tw_id] = part
+
+    for ent_id, det in detection_info.items():
+        video = video_map.get(det.video_id)
+        declared = entity_partition_declared.get(ent_id)
+        if video and declared and declared != str(video.partition_id):
+            issues.error(
+                f"partition(Video)->partition(Entity_TW) mismatch for {ent_id}",
+                "detection",
+            )
+
+
+def validate_structural_edges(
+    rels: pd.DataFrame,
+    video_map: Dict[str, VideoInfo],
+    issues: IssueCollector,
+):
+    node_partitions: Dict[str, str] = {}
+    for v in video_map.values():
+        node_partitions[v.video_id] = str(v.partition_id)
+
+    for i, row in rels.iterrows():
+        etype = row["type"]
+        if etype in {"LOCATED_AT", "RECORDED_BY", "DETECTED_IN"}:
+            node_partitions[str(row["source_id"])] = str(row["partition_id"])
+            node_partitions[str(row["destination_id"])] = str(row["partition_id"])
+
+    near_pairs: Set[Tuple[str, str, str]] = set()
+    videos_by_camera: Dict[str, List[VideoInfo]] = {}
+    for v in video_map.values():
+        videos_by_camera.setdefault(v.camera_id, []).append(v)
+    for cam in videos_by_camera:
+        videos_by_camera[cam].sort(key=lambda x: x.start)
+
+    for i, row in rels.iterrows():
+        line = i + 2
+        etype = row["type"]
+        src = str(row["source_id"])
+        dst = str(row["destination_id"])
+        part = str(row["partition_id"])
+
+        if etype == "NEAR_BY":
+            if src not in node_partitions or dst not in node_partitions:
+                issues.error(
+                    f"NEAR_BY endpoint missing at line {line}: {src}->{dst}",
+                    "relation",
+                )
+                continue
+            src_part = node_partitions.get(src)
+            dst_part = node_partitions.get(dst)
+            if src_part != dst_part or src_part != part:
+                issues.error(
+                    f"NEAR_BY partition mismatch at line {line}: {src}({src_part})->{dst}({dst_part}), rel={part}",
+                    "relation",
+                )
+            near_pairs.add((src, dst, part))
+            continue
+
+        if etype == "NEXT_TO":
+            v1 = video_map.get(src)
+            v2 = video_map.get(dst)
+            if not v1 or not v2:
+                issues.error(f"NEXT_TO missing video endpoint at line {line}: {src}->{dst}", "relation")
+                continue
+            if v1.camera_id != v2.camera_id:
+                issues.error(f"NEXT_TO camera mismatch at line {line}: {src}->{dst}", "relation")
+                continue
+            ordered = videos_by_camera.get(v1.camera_id, [])
+            is_consecutive = False
+            for idx in range(len(ordered) - 1):
+                if ordered[idx].video_id == src and ordered[idx + 1].video_id == dst:
+                    is_consecutive = True
+                    break
+            if not is_consecutive:
+                issues.error(f"NEXT_TO must connect consecutive videos at line {line}: {src}->{dst}", "relation")
+
+    for src, dst, part in near_pairs:
+        if (dst, src, part) not in near_pairs:
+            issues.error(f"NEAR_BY reverse missing for {src}->{dst} in partition {part}", "relation")
+
+
+def validate_partition_self_containment(root: Path, issues: IssueCollector):
+    by_partition_root = root / "by_partition"
+    if not by_partition_root.exists():
+        return
+
+    for pdir in sorted(x for x in by_partition_root.iterdir() if x.is_dir()):
+        local_ids: Set[str] = set()
+
+        node_files = [
+            "nodes_location.csv",
+            "nodes_camera.csv",
+            "nodes_video.csv",
+            "nodes_person_TW.csv",
+            "nodes_thing_TW.csv",
+            "nodes_vehicle_TW.csv",
+        ]
+        for nf in node_files:
+            path = pdir / nf
+            if not path.exists():
+                continue
+            ndf = pd.read_csv(path, dtype=str, keep_default_na=False)
+            if ndf.empty:
+                continue
+            id_col = ndf.columns[0]
+            local_ids.update(str(x) for x in ndf[id_col].tolist())
+
+        rel_path = pdir / "rels.csv"
+        if not rel_path.exists():
+            continue
+        rdf = pd.read_csv(rel_path, dtype=str, keep_default_na=False)
+        for i, row in rdf.iterrows():
+            src = str(row["source_id"])
+            dst = str(row["destination_id"])
+            if src not in local_ids or dst not in local_ids:
+                missing = []
+                if src not in local_ids:
+                    missing.append(f"source_id={src}")
+                if dst not in local_ids:
+                    missing.append(f"destination_id={dst}")
+                issues.error(
+                    f"Orphan edge in {pdir.name}/rels.csv line {i + 2}: "
+                    f"type={row['type']}, partition_id={row['partition_id']}, "
+                    f"{', '.join(missing)}",
+                    "relation",
+                )
+
+
 # =========================
 # SUMMARY
 # =========================
@@ -258,6 +451,11 @@ def build_summary(issues: IssueCollector) -> ValidationSummary:
 
     s.total_errors = len(issues.errors)
     s.total_warnings = len(issues.warnings)
+
+    if s.total_errors > 0 and all(
+        x == "PASS" for x in [s.relation_valid, s.detection_valid, s.semantic_valid, s.schema_valid]
+    ):
+        s.schema_valid = "FAIL"
 
     return s
 
@@ -278,12 +476,26 @@ def verify_dataset(data_dir: str):
     tw_map = validate_timewindows(dfs["nodes_timewindow.csv"], issues)
     video_map = validate_videos(dfs["nodes_video.csv"], issues)
 
-    validate_edges(
+    detection_info = validate_edges(
         dfs["rels.csv"],
         video_map,
         tw_map,
         issues
     )
+
+    validate_partition_and_uniqueness(
+        dfs,
+        dfs["rels.csv"],
+        video_map,
+        detection_info,
+        issues,
+    )
+    validate_structural_edges(
+        dfs["rels.csv"],
+        video_map,
+        issues,
+    )
+    validate_partition_self_containment(root, issues)
 
     summary = build_summary(issues)
 
