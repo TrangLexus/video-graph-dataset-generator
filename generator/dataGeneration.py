@@ -956,12 +956,13 @@ def main():
     vehicle_tw_w = CsvAppender(os.path.join(args.out, "nodes_vehicle_TW.csv"), headers["nodes_vehicle_TW.csv"])
     rels_w = CsvAppender(os.path.join(args.out, "rels.csv"), headers["rels.csv"])
 
-    if args.num_locations > 1:
-        for i in range(1, args.num_locations):
-            loc1 = fmt_loc(i)
-            loc2 = fmt_loc(i + 1)
-            p1 = loc_to_partition[loc1]
-            p2 = loc_to_partition[loc2]
+    for part in range(1, args.num_partitions + 1):
+        part_locs = sorted(partition_to_locs.get(part, []))
+        if len(part_locs) < 2:
+            continue
+        for i in range(len(part_locs) - 1):
+            loc1 = part_locs[i]
+            loc2 = part_locs[i + 1]
             # NEAR_BY is structural: no timestamps, camera/location context
             row = [
                 loc1,
@@ -971,7 +972,7 @@ def main():
                 "",  # ts_end
                 "",  # date
                 "",  # tw_id
-                str(p1),  # partition_id (loc1 determines partition)
+                str(part),  # partition_id (partition-local only)
                 "",  # camera_id
                 "",  # location_id
                 "",  # confidence
@@ -979,7 +980,7 @@ def main():
                 "distance=50",  # description
             ]
             rels_w.writerow(row)
-            partition_writers.writerow(p1, "rels.csv", row)
+            partition_writers.writerow(part, "rels.csv", row)
             reverse_row = [
                 loc2,
                 loc1,
@@ -988,7 +989,7 @@ def main():
                 "",
                 "",
                 "",
-                str(p2),
+                str(part),
                 "",
                 "",
                 "",
@@ -996,7 +997,7 @@ def main():
                 "distance=50",
             ]
             rels_w.writerow(reverse_row)
-            partition_writers.writerow(p2, "rels.csv", reverse_row)
+            partition_writers.writerow(part, "rels.csv", reverse_row)
 
     for day_date in dates:
         date_str = yyyy_mm_dd(datetime.combine(day_date, time(0, 0, 0)))
