@@ -392,6 +392,7 @@ def validate_partition_self_containment(root: Path, issues: IssueCollector):
         return
 
     for pdir in sorted(x for x in by_partition_root.iterdir() if x.is_dir()):
+        # Collect all node IDs physically present in this partition directory.
         local_ids: Set[str] = set()
 
         node_files = [
@@ -417,6 +418,8 @@ def validate_partition_self_containment(root: Path, issues: IssueCollector):
             continue
         rdf = pd.read_csv(rel_path, dtype=str, keep_default_na=False)
         for i, row in rdf.iterrows():
+            # Every relation in by_partition must be self-contained: both endpoints
+            # must resolve to IDs that exist in the same partition directory.
             src = str(row["source_id"])
             dst = str(row["destination_id"])
             if src not in local_ids or dst not in local_ids:
