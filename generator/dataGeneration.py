@@ -479,14 +479,14 @@ class PartitionWriters:
         loc_rows: List[List[str]],
         camera_rows: List[List[str]],
         partition_rows: List[List[str]],
-        timewindow_rows: List[List[str]],
+        # timewindow_rows: List[List[str]],
     ) -> None:
         pdir = self._partition_path(partition_id)
         ensure_dir(pdir)
         write_csv(os.path.join(pdir, "nodes_location.csv"), self.headers["nodes_location.csv"], loc_rows)
         write_csv(os.path.join(pdir, "nodes_camera.csv"), self.headers["nodes_camera.csv"], camera_rows)
         write_csv(os.path.join(pdir, "partitions.csv"), self.headers["partitions.csv"], partition_rows)
-        write_csv(os.path.join(pdir, "nodes_timewindow.csv"), self.headers["nodes_timewindow.csv"], timewindow_rows)
+        # write_csv(os.path.join(pdir, "nodes_timewindow.csv"), self.headers["nodes_timewindow.csv"], timewindow_rows)
         for loc in loc_rows:
             self._register_node_partition(loc[0], partition_id)
         for cam in camera_rows:
