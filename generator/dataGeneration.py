@@ -53,10 +53,26 @@ from collections import defaultdict
 
 
 TW_SECONDS_FIXED = 10
-INDOOR_LOC_TYPES = {"Indoor", "Office"}
-OUTDOOR_LOC_TYPES = {"Outdoor", "Road", "Parking", "Garage"}
-ALLOWED_LOC_TYPES = tuple(sorted(INDOOR_LOC_TYPES | OUTDOOR_LOC_TYPES))
+# INDOOR_LOC_TYPES = {"Indoor", "Office"}
+# OUTDOOR_LOC_TYPES = {"Outdoor", "Road", "Parking", "Garage"}
+# ALLOWED_LOC_TYPES = tuple(sorted(INDOOR_LOC_TYPES | OUTDOOR_LOC_TYPES))
 
+INDOOR_LOC_TYPES = {
+    "Corridor",
+    "Office",
+    "Classroom",
+    "Lobby",
+}
+
+OUTDOOR_LOC_TYPES = {
+    "BuildingEntrance",
+    "OutdoorWalkway",
+    "Road",
+    "Parking",
+    "Gate",
+}
+
+ALLOWED_LOC_TYPES = tuple(sorted(INDOOR_LOC_TYPES | OUTDOOR_LOC_TYPES))
 
 def ensure_dir(p: str) -> None:
     os.makedirs(p, exist_ok=True)
@@ -130,8 +146,8 @@ def sample_detection_interval(
 
 
 def validate_detection_context(
-    ts_start: datetime,
-    ts_end: datetime,
+    start_time: datetime,
+    end_time: datetime,
     tw_start: datetime,
     tw_end: datetime,
     tw_key: str,
@@ -145,13 +161,13 @@ def validate_detection_context(
     Enforce strict Layer-5 constraints for one DETECTED_IN edge.
     TimeWindow is interpreted as half-open [tw_start, tw_end).
     """
-    if not (ts_start < ts_end):
-        raise ValueError("Invalid DETECTED_IN interval: ts_start must be < ts_end")
-    if not (tw_start <= ts_start and ts_end <= tw_end):
+    if not (start_time < end_time):
+        raise ValueError("Invalid DETECTED_IN interval: start_time must be < end_time")
+    if not (tw_start <= start_time and end_time <= tw_end):
         raise ValueError("Invalid DETECTED_IN interval: outside [tw_start, tw_end)")
-    if not (video.start_time <= ts_start < ts_end <= video.end_time):
+    if not (video.start_time <= start_time < end_time <= video.end_time):
         raise ValueError("Invalid DETECTED_IN interval: outside video bounds")
-    expected_tw_idx = int((ts_start - day_midnight).total_seconds() // TW_SECONDS_FIXED)
+    expected_tw_idx = int((start_time - day_midnight).total_seconds() // TW_SECONDS_FIXED)
     expected_tw_key = f"TW{expected_tw_idx:04d}"
     if tw_key != expected_tw_key:
         raise ValueError(f"tw_id mismatch for detection: expected {expected_tw_key}, got {tw_key}")
@@ -301,50 +317,94 @@ class DensityCfg:
 def density_profile(name: str) -> Dict[str, DensityCfg]:
     if name == "peak":
         return {
-            "Outdoor": DensityCfg(60, 120, 0.70, 10, 40, 0.25, 6, 0.18, 2, 6, 0.55, 1, 3),
-            "Entrance": DensityCfg(50, 110, 0.70, 6, 25, 0.30, 6, 0.16, 2, 6, 0.45, 1, 3),
-            "Office": DensityCfg(20, 60, 0.55, 1, 8, 0.45, 5, 0.12, 2, 5, 0.25, 1, 2),
-            "Corridor": DensityCfg(25, 70, 0.55, 1, 10, 0.40, 5, 0.12, 2, 5, 0.25, 1, 2),
-            "Garage": DensityCfg(10, 35, 0.45, 10, 30, 0.55, 4, 0.08, 2, 5, 0.70, 1, 4),
-            "Parking": DensityCfg(12, 40, 0.45, 10, 35, 0.55, 4, 0.08, 2, 5, 0.70, 1, 4),
+            "BuildingEntrance": DensityCfg(50, 110, 0.55, 2, 10, 0.30, 6, 0.12, 2, 5, 0.12, 1, 2),
+            "Corridor":         DensityCfg(35, 90,  0.45, 0, 4,  0.35, 5, 0.08, 2, 4, 0.06, 1, 1),
+            "Office":           DensityCfg(18, 50,  0.30, 0, 2,  0.50, 4, 0.04, 2, 3, 0.03, 1, 1),
+            "Classroom":        DensityCfg(25, 70,  0.20, 0, 2,  0.65, 3, 0.03, 2, 3, 0.02, 1, 1),
+            "OutdoorWalkway":   DensityCfg(35, 85,  0.35, 0, 6,  0.30, 5, 0.08, 2, 4, 0.06, 1, 1),
+            "Road":             DensityCfg(8, 25,   0.10, 2, 10, 0.45, 3, 0.02, 2, 3, 0.18, 1, 2),
+            "Parking":          DensityCfg(10, 30,  0.18, 4, 14, 0.55, 3, 0.02, 2, 3, 0.25, 1, 2),
+            "Gate":             DensityCfg(20, 60,  0.28, 0, 4,  0.30, 4, 0.08, 2, 4, 0.04, 1, 1),
+            "Lobby":            DensityCfg(15, 40,  0.22, 0, 2,  0.55, 3, 0.05, 2, 3, 0.03, 1, 1),
         }
+
     if name == "heavy":
         return {
-            "Outdoor": DensityCfg(35, 80, 0.65, 4, 18, 0.35, 5, 0.14, 2, 6, 0.45, 1, 3),
-            "Entrance": DensityCfg(30, 75, 0.65, 3, 15, 0.38, 5, 0.14, 2, 6, 0.35, 1, 3),
-            "Office": DensityCfg(12, 35, 0.50, 1, 6, 0.55, 4, 0.10, 2, 5, 0.20, 1, 2),
-            "Corridor": DensityCfg(14, 40, 0.50, 1, 8, 0.50, 4, 0.10, 2, 5, 0.20, 1, 2),
-            "Garage": DensityCfg(6, 18, 0.40, 6, 18, 0.65, 3, 0.06, 2, 5, 0.55, 1, 4),
-            "Parking": DensityCfg(6, 20, 0.40, 6, 22, 0.65, 3, 0.06, 2, 5, 0.55, 1, 4),
+            "BuildingEntrance": DensityCfg(32, 75,  0.50, 1, 6,  0.35, 5, 0.10, 2, 4, 0.10, 1, 2),
+            "Corridor":         DensityCfg(22, 55,  0.38, 0, 3,  0.45, 4, 0.06, 2, 3, 0.05, 1, 1),
+            "Office":           DensityCfg(10, 28,  0.28, 0, 1,  0.60, 3, 0.03, 2, 3, 0.02, 1, 1),
+            "Classroom":        DensityCfg(14, 40,  0.18, 0, 1,  0.70, 2, 0.02, 2, 3, 0.01, 1, 1),
+            "OutdoorWalkway":   DensityCfg(20, 50,  0.30, 0, 4,  0.35, 4, 0.06, 2, 4, 0.05, 1, 1),
+            "Road":             DensityCfg(5, 16,   0.10, 1, 6,  0.50, 2, 0.02, 2, 3, 0.14, 1, 1),
+            "Parking":          DensityCfg(6, 18,   0.16, 2, 8,  0.60, 2, 0.02, 2, 3, 0.20, 1, 1),
+            "Gate":             DensityCfg(12, 35,  0.24, 0, 2,  0.35, 3, 0.06, 2, 4, 0.03, 1, 1),
+            "Lobby":            DensityCfg(10, 25,  0.20, 0, 1,  0.60, 2, 0.04, 2, 3, 0.02, 1, 1),
         }
+
     return {
-        "Outdoor": DensityCfg(20, 55, 0.60, 1, 10, 0.40, 4, 0.10, 2, 6, 0.30, 1, 2),
-        "Entrance": DensityCfg(18, 50, 0.60, 1, 8, 0.45, 4, 0.10, 2, 6, 0.25, 1, 2),
-        "Office": DensityCfg(8, 22, 0.45, 0, 4, 0.60, 3, 0.06, 2, 5, 0.15, 1, 2),
-        "Corridor": DensityCfg(10, 25, 0.45, 0, 5, 0.55, 3, 0.06, 2, 5, 0.15, 1, 2),
-        "Garage": DensityCfg(4, 12, 0.35, 3, 10, 0.70, 2, 0.04, 2, 4, 0.55, 1, 3),
-        "Parking": DensityCfg(4, 14, 0.35, 3, 12, 0.70, 2, 0.04, 2, 4, 0.55, 1, 3),
+        "BuildingEntrance": DensityCfg(18, 45, 0.45, 0, 4, 0.45, 4, 0.08, 2, 4, 0.08, 1, 1),
+        "Corridor":         DensityCfg(12, 30, 0.35, 0, 2, 0.55, 3, 0.05, 2, 3, 0.05, 1, 1),
+        "Office":           DensityCfg(6, 18,  0.25, 0, 1, 0.65, 2, 0.03, 2, 3, 0.02, 1, 1),
+        "Classroom":        DensityCfg(10, 28, 0.20, 0, 1, 0.70, 2, 0.02, 2, 3, 0.01, 1, 1),
+        "OutdoorWalkway":   DensityCfg(15, 40, 0.30, 0, 4, 0.40, 4, 0.06, 2, 4, 0.05, 1, 1),
+        "Road":             DensityCfg(4, 14,  0.10, 1, 6, 0.55, 2, 0.02, 2, 3, 0.12, 1, 1),
+        "Parking":          DensityCfg(4, 12,  0.15, 2, 8, 0.65, 2, 0.02, 2, 3, 0.18, 1, 1),
+        "Gate":             DensityCfg(10, 30, 0.25, 0, 2, 0.35, 3, 0.06, 2, 4, 0.03, 1, 1),
+        "Lobby":            DensityCfg(8, 20,  0.20, 0, 1, 0.60, 2, 0.04, 2, 3, 0.02, 1, 1),
     }
 
 
+# def gen_locations(rng: random.Random, n: int) -> List[Tuple[str, str, str]]:
+#     loc_types = [
+#         ("Outdoor", 0.25),
+#         ("Road", 0.20),
+#         ("Office", 0.20),
+#         ("Indoor", 0.15),
+#         ("Parking", 0.12),
+#         ("Garage", 0.08),
+#     ]
+#     out = []
+#     for i in range(1, n + 1):
+#         lt = choice_weighted(rng, loc_types)
+#         out.append((fmt_loc(i), f"{lt}_{i}", lt))
+#     return out
+
 def gen_locations(rng: random.Random, n: int) -> List[Tuple[str, str, str]]:
     loc_types = [
-        ("Outdoor", 0.25),
-        ("Road", 0.20),
-        ("Office", 0.20),
-        ("Indoor", 0.15),
-        ("Parking", 0.12),
-        ("Garage", 0.08),
+        ("BuildingEntrance", 0.18),
+        ("Corridor", 0.16),
+        ("Office", 0.12),
+        ("Classroom", 0.14),
+        ("OutdoorWalkway", 0.18),
+        ("Road", 0.08),
+        ("Parking", 0.08),
+        ("Gate", 0.04),
+        ("Lobby", 0.02),
     ]
+
+    campus_name_templates = {
+        "BuildingEntrance": "Building Entrance",
+        "Corridor": "Academic Corridor",
+        "Office": "Admin Office",
+        "Classroom": "Classroom Block",
+        "OutdoorWalkway": "Outdoor Walkway",
+        "Road": "Campus Road",
+        "Parking": "Parking Area",
+        "Gate": "Main Gate",
+        "Lobby": "Building Lobby",
+    }
+
     out = []
     for i in range(1, n + 1):
         lt = choice_weighted(rng, loc_types)
-        out.append((fmt_loc(i), f"{lt}_{i}", lt))
+        name = f"{campus_name_templates.get(lt, lt)} {i}"
+        out.append((fmt_loc(i), name, lt))
     return out
 
-
 def gen_cameras(rng: random.Random, locations: List[Tuple[str, str, str]], cams_per_loc: int):
-    view_types = ["Wide", "Corridor", "Entrance", "Zoom"]
+    # view_types = ["Wide", "Corridor", "Entrance", "Zoom"]
+    view_types = ["Wide", "EntranceView", "CorridorView", "Zoom"]
+
     cams = []
     c = 1
     for loc_id, loc_name, loc_type in locations:
@@ -408,6 +468,7 @@ class PartitionWriters:
         self.by_partition_root = os.path.join(out_root, "by_partition")
         ensure_dir(self.by_partition_root)
         self._writers: Dict[int, Dict[str, CsvAppender]] = {}
+        self._node_partition: Dict[str, int] = {}
 
     def _partition_path(self, partition_id: int) -> str:
         return os.path.join(self.by_partition_root, partition_dir_name(partition_id))
@@ -415,16 +476,27 @@ class PartitionWriters:
     def init_partition_static_files(
         self,
         partition_id: int,
-        loc_row: List[str],
+        loc_rows: List[List[str]],
         camera_rows: List[List[str]],
+        partition_rows: List[List[str]],
         timewindow_rows: List[List[str]],
     ) -> None:
         pdir = self._partition_path(partition_id)
         ensure_dir(pdir)
-        write_csv(os.path.join(pdir, "nodes_location.csv"), self.headers["nodes_location.csv"], [loc_row])
+        write_csv(os.path.join(pdir, "nodes_location.csv"), self.headers["nodes_location.csv"], loc_rows)
         write_csv(os.path.join(pdir, "nodes_camera.csv"), self.headers["nodes_camera.csv"], camera_rows)
-        write_csv(os.path.join(pdir, "partitions.csv"), self.headers["partitions.csv"], [[str(partition_id), loc_row[0]]])
+        write_csv(os.path.join(pdir, "partitions.csv"), self.headers["partitions.csv"], partition_rows)
         write_csv(os.path.join(pdir, "nodes_timewindow.csv"), self.headers["nodes_timewindow.csv"], timewindow_rows)
+        for loc in loc_rows:
+            self._register_node_partition(loc[0], partition_id)
+        for cam in camera_rows:
+            self._register_node_partition(cam[0], partition_id)
+
+    def _register_node_partition(self, node_id: str, partition_id: int) -> None:
+        prev = self._node_partition.get(node_id)
+        if prev is not None and prev != partition_id:
+            raise ValueError(f"Node assigned to multiple partitions: node_id={node_id}, prev={prev}, curr={partition_id}")
+        self._node_partition[node_id] = partition_id
 
     def get_partition_writer(self, partition_id: int, filename: str) -> CsvAppender:
         if partition_id not in self._writers:
@@ -436,6 +508,19 @@ class PartitionWriters:
         return self._writers[partition_id][filename]
 
     def writerow(self, partition_id: int, filename: str, row: List[str]) -> None:
+        if filename == "nodes_video.csv":
+            self._register_node_partition(str(row[0]), partition_id)
+        elif filename in {"nodes_person_TW.csv", "nodes_thing_TW.csv", "nodes_vehicle_TW.csv"}:
+            self._register_node_partition(str(row[0]), partition_id)
+        elif filename == "rels.csv":
+            # Keep by_partition/partition_xxxx self-contained: write edge only when
+            # both endpoints are already registered to the same partition.
+            src_id = str(row[0])
+            dst_id = str(row[1])
+            src_part = self._node_partition.get(src_id)
+            dst_part = self._node_partition.get(dst_id)
+            if src_part != partition_id or dst_part != partition_id:
+                return
         self.get_partition_writer(partition_id, filename).writerow(row)
 
     def close(self) -> None:
@@ -494,17 +579,17 @@ def write_layer8_partitions_and_validate(out_root: str, loc_to_type: Dict[str, s
             raise ValueError(f"DETECTED_IN references missing Entity_TW: {d['source_id']}")
         if d["destination_id"] not in video_bounds:
             raise ValueError(f"DETECTED_IN references missing video_id: {d['destination_id']}")
-        ts_start = datetime.fromisoformat(d["ts_start"])
-        ts_end = datetime.fromisoformat(d["ts_end"])
-        if not (ts_start < ts_end):
-            raise ValueError(f"DETECTED_IN must satisfy ts_start < ts_end: {d['source_id']}")
+        start_time = datetime.fromisoformat(d["start_time"])
+        end_time = datetime.fromisoformat(d["end_time"])
+        if not (start_time < end_time):
+            raise ValueError(f"DETECTED_IN must satisfy start_time < end_time: {d['source_id']}")
         if (d["date"], d["tw_id"]) not in tw_bounds:
             raise ValueError(f"Missing TimeWindow for detection: {(d['date'], d['tw_id'])}")
         tw_start, tw_end = tw_bounds[(d["date"], d["tw_id"])]
-        if not (tw_start <= ts_start < ts_end <= tw_end):
+        if not (tw_start <= start_time < end_time <= tw_end):
             raise ValueError(f"DETECTED_IN outside TimeWindow for {d['source_id']}")
         vid_start, vid_end = video_bounds[d["destination_id"]]
-        if not (vid_start <= ts_start < ts_end <= vid_end):
+        if not (vid_start <= start_time < end_time <= vid_end):
             raise ValueError(f"DETECTED_IN outside video range for {d['source_id']}")
     for ent_id in entity_ids:
         if len(det_by_entity.get(ent_id, [])) != 1:
@@ -512,8 +597,8 @@ def write_layer8_partitions_and_validate(out_root: str, loc_to_type: Dict[str, s
 
     det_interval = {
         ent_id: (
-            datetime.fromisoformat(rows[0]["ts_start"]),
-            datetime.fromisoformat(rows[0]["ts_end"]),
+            datetime.fromisoformat(rows[0]["start_time"]),
+            datetime.fromisoformat(rows[0]["end_time"]),
             rows[0]["location_id"],
             rows[0]["date"],
         )
@@ -530,29 +615,29 @@ def write_layer8_partitions_and_validate(out_root: str, loc_to_type: Dict[str, s
         src, dst = r["source_id"], r["destination_id"]
         if src not in entity_ids or dst not in entity_ids:
             raise ValueError(f"Relation has orphan endpoint: {r}")
-        ts_start = datetime.fromisoformat(r["ts_start"])
-        ts_end = datetime.fromisoformat(r["ts_end"])
-        if not (ts_start < ts_end):
-            raise ValueError(f"Relation must satisfy ts_start < ts_end: {r}")
+        start_time = datetime.fromisoformat(r["start_time"])
+        end_time = datetime.fromisoformat(r["end_time"])
+        if not (start_time < end_time):
+            raise ValueError(f"Relation must satisfy start_time < end_time: {r}")
         src_start, src_end, _src_loc, _src_date = det_interval[src]
         dst_start, dst_end, _dst_loc, _dst_date = det_interval[dst]
         ov = overlap_interval(src_start, src_end, dst_start, dst_end)
         if ov is None or not (ov[0] < ov[1]):
             raise ValueError(f"Relation overlap must be > 0: {r}")
-        edge_key = (r["type"], src, dst, r["ts_start"], r["ts_end"])
+        edge_key = (r["type"], src, dst, r["start_time"], r["end_time"])
         if edge_key in edge_seen:
             raise ValueError(f"Duplicate edge detected: {edge_key}")
         edge_seen.add(edge_key)
         if r["type"] == "INTERACTS_WITH":
-            interacts_seen.add((src, dst, r["ts_start"], r["ts_end"]))
+            interacts_seen.add((src, dst, r["start_time"], r["end_time"]))
 
     for r in rels:
         if r["type"] == "NEAR_BY":
             nearby_seen.add((r["source_id"], r["destination_id"]))
 
     # CHECK 4 (undirected consistency)
-    for src, dst, ts_start, ts_end in interacts_seen:
-        if (dst, src, ts_start, ts_end) not in interacts_seen:
+    for src, dst, start_time, end_time in interacts_seen:
+        if (dst, src, start_time, end_time) not in interacts_seen:
             raise ValueError(f"INTERACTS_WITH reverse edge missing: {src} -> {dst}")
     for src, dst in nearby_seen:
         if (dst, src) not in nearby_seen:
@@ -611,7 +696,7 @@ def write_layer8_partitions_and_validate(out_root: str, loc_to_type: Dict[str, s
             continue
         key = (r["date"], r["location_id"])
         row_values = [r[h] for h in r.keys()]
-        rel_key = (r["source_id"], r["destination_id"], r["type"], r["ts_start"], r["ts_end"])
+        rel_key = (r["source_id"], r["destination_id"], r["type"], r["start_time"], r["end_time"])
         if rel_key in rel_unique_per_partition[key]:
             raise ValueError(f"Duplicate relation in partition {key}: {rel_key}")
         rel_unique_per_partition[key].add(rel_key)
@@ -657,10 +742,24 @@ def write_layer8_partitions_and_validate(out_root: str, loc_to_type: Dict[str, s
 
 
 def main():
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(
+        description=(
+            "Generate synthetic video-graph CSVs with partition outputs. "
+            "Each partition may contain multiple locations."
+        )
+    )
     ap.add_argument("--out", required=True)
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--num_locations", type=int, default=10)
+    ap.add_argument(
+        "--num_partitions",
+        type=int,
+        default=10,
+        help=(
+            "Number of partitions to create. Locations are distributed across partitions "
+            "as evenly as possible, so each partition can contain multiple locations."
+        ),
+    )
     ap.add_argument("--cameras_per_location", type=int, default=3)
     ap.add_argument("--persons_pool", type=int, default=2000)
     ap.add_argument("--things_pool", type=int, default=800)
@@ -698,6 +797,10 @@ def main():
         raise ValueError("num_locations must be > 0")
     if args.cameras_per_location <= 0:
         raise ValueError("cameras_per_location must be > 0")
+    if args.num_partitions <= 0:
+        raise ValueError("num_partitions must be > 0")
+    if args.num_partitions > args.num_locations:
+        raise ValueError("num_partitions must be <= num_locations")
     if args.persons_pool <= 0:
         raise ValueError("persons_pool must be > 0")
     if args.things_pool < 0:
@@ -731,18 +834,18 @@ def main():
 
     headers = {
         # Static nodes
-        "nodes_location.csv": ["loc_id", "name", "loc_type"],
+        "nodes_location.csv": ["location_id", "name", "location_type"],
         "nodes_camera.csv": ["camera_id", "name", "view_type", "is_indoor"],
-        "partitions.csv": ["partition_id", "loc_id"],
-        "nodes_person.csv": ["pid", "gender", "age_group"],
-        "nodes_thing.csv": ["tid", "thing_type", "size_category", "base_color"],
-        "nodes_vehicle.csv": ["vid", "vehicle_type", "base_color"],
+        "partitions.csv": ["partition_id", "location_id"],
+        "nodes_person.csv": ["person_id", "gender", "age_group"],
+        "nodes_thing.csv": ["thing_id", "thing_type", "size_category", "base_color"],
+        "nodes_vehicle.csv": ["vehicle_id", "vehicle_type", "base_color"],
         "nodes_timewindow.csv": ["date", "tw_id", "start_time", "end_time", "duration_seconds"],
         "nodes_video.csv": ["video_id", "camera_id", "partition_id", "date", "start_time", "end_time", "fps", "resolution"],
         # Temporal nodes with dynamic attributes
         "nodes_person_TW.csv": [
             "pid_tw",      # composite id: person_id + TW
-            "id_global",   # references nodes_person.csv
+            "person_id",   # references nodes_person.csv
             "date",        # date part for partition pruning
             "tw_id",       # TimeWindow id (TWxxxx)
             "partition_id",# partition the node belongs to
@@ -752,7 +855,7 @@ def main():
         ],
         "nodes_thing_TW.csv": [
             "tid_tw",
-            "id_global",
+            "thing_id",
             "date",
             "tw_id",
             "partition_id",
@@ -763,7 +866,7 @@ def main():
         ],
         "nodes_vehicle_TW.csv": [
             "vid_tw",
-            "id_global",
+            "vehicle_id",
             "date",
             "tw_id",
             "partition_id",
@@ -773,14 +876,14 @@ def main():
             "direction",
         ],
         # Relationship edges. Note: columns window_id and description are replaced
-        # by more expressive date/tw_id/camera_id/location_id. The ts_start and
-        # ts_end columns will be written as datetime objects (full timestamp).
+        # by more expressive date/tw_id/camera_id/location_id. The start_time and
+        # end_time columns will be written as datetime objects (full timestamp).
         "rels.csv": [
             "source_id",
             "destination_id",
             "type",
-            "ts_start",
-            "ts_end",
+            "start_time",
+            "end_time",
             "date",
             "tw_id",
             "partition_id",
@@ -796,7 +899,20 @@ def main():
     for loc_id, _loc_name, loc_type in locations:
         if loc_type not in ALLOWED_LOC_TYPES:
             raise ValueError(f"Invalid loc_type={loc_type} for loc_id={loc_id}")
-    loc_to_partition = {loc_id: i + 1 for i, (loc_id, _, _) in enumerate(locations)}
+    sorted_loc_ids = sorted(loc_id for (loc_id, _name, _loc_type) in locations)
+    # Partition assignment is balanced by contiguous sorted location slices.
+    # When num_partitions < num_locations, each partition receives multiple locations.
+    q, r = divmod(len(sorted_loc_ids), args.num_partitions)
+    partition_to_locs: Dict[int, List[str]] = {}
+    loc_to_partition: Dict[str, int] = {}
+    cursor = 0
+    for partition_id in range(1, args.num_partitions + 1):
+        bucket_size = q + (1 if partition_id <= r else 0)
+        bucket = sorted_loc_ids[cursor:cursor + bucket_size]
+        partition_to_locs[partition_id] = bucket
+        for loc_id in bucket:
+            loc_to_partition[loc_id] = partition_id
+        cursor += bucket_size
     loc_to_type = {loc_id: loc_type for (loc_id, _, loc_type) in locations}
     loc_rows_by_id = {loc_id: [loc_id, name, loc_type] for (loc_id, name, loc_type) in locations}
 
@@ -894,12 +1010,13 @@ def main():
     write_csv(os.path.join(args.out, "nodes_timewindow.csv"), headers["nodes_timewindow.csv"], timewindow_rows)
 
     partition_writers = PartitionWriters(args.out, headers)
-    for loc_id, _name, _loc_type in locations:
-        part = loc_to_partition[loc_id]
+    for part in range(1, args.num_partitions + 1):
+        part_locs = partition_to_locs[part]
         partition_writers.init_partition_static_files(
             partition_id=part,
-            loc_row=loc_rows_by_id[loc_id],
+            loc_rows=[loc_rows_by_id[loc_id] for loc_id in part_locs],
             camera_rows=cameras_by_partition.get(part, []),
+            partition_rows=[[str(part), loc_id] for loc_id in part_locs],
             timewindow_rows=timewindow_rows,
         )
 
@@ -938,22 +1055,24 @@ def main():
     vehicle_tw_w = CsvAppender(os.path.join(args.out, "nodes_vehicle_TW.csv"), headers["nodes_vehicle_TW.csv"])
     rels_w = CsvAppender(os.path.join(args.out, "rels.csv"), headers["rels.csv"])
 
-    if args.num_locations > 1:
-        for i in range(1, args.num_locations):
-            loc1 = fmt_loc(i)
-            loc2 = fmt_loc(i + 1)
-            p1 = loc_to_partition[loc1]
-            p2 = loc_to_partition[loc2]
-            # NEAR_BY is structural: no timestamps, camera/location context
+    for part in range(1, args.num_partitions + 1):
+        part_locs = sorted(partition_to_locs.get(part, []))
+        if len(part_locs) < 2:
+            continue
+        for i in range(len(part_locs) - 1):
+            loc1 = part_locs[i]
+            loc2 = part_locs[i + 1]
+            # NEAR_BY edges are generated only between neighboring locations inside
+            # the same partition to preserve partition-local structural context.
             row = [
                 loc1,
                 loc2,
                 "NEAR_BY",
-                "",  # ts_start
-                "",  # ts_end
+                "",  # start_time
+                "",  # end_time
                 "",  # date
                 "",  # tw_id
-                str(p1),  # partition_id (loc1 determines partition)
+                str(part),  # partition_id (partition-local only)
                 "",  # camera_id
                 "",  # location_id
                 "",  # confidence
@@ -961,7 +1080,7 @@ def main():
                 "distance=50",  # description
             ]
             rels_w.writerow(row)
-            partition_writers.writerow(p1, "rels.csv", row)
+            partition_writers.writerow(part, "rels.csv", row)
             reverse_row = [
                 loc2,
                 loc1,
@@ -970,7 +1089,7 @@ def main():
                 "",
                 "",
                 "",
-                str(p2),
+                str(part),
                 "",
                 "",
                 "",
@@ -978,7 +1097,7 @@ def main():
                 "distance=50",
             ]
             rels_w.writerow(reverse_row)
-            partition_writers.writerow(p2, "rels.csv", reverse_row)
+            partition_writers.writerow(part, "rels.csv", reverse_row)
 
     for day_date in dates:
         date_str = yyyy_mm_dd(datetime.combine(day_date, time(0, 0, 0)))
@@ -1052,8 +1171,14 @@ def main():
 
             for cam_id, _cam_name, _view_type, _is_indoor, loc_id in cameras:
                 part = loc_to_partition[loc_id]
-                loc_type = loc_to_type.get(loc_id, "Outdoor")
-                cfg = dens_map.get(loc_type, dens_map["Outdoor"])
+                # loc_type = loc_to_type.get(loc_id, "Outdoor")
+                # cfg = dens_map.get(loc_type, dens_map["Outdoor"])
+                
+                loc_type = loc_to_type.get(loc_id, "OutdoorWalkway")
+                if loc_type not in dens_map:
+                    raise ValueError(f"Missing density profile for loc_type={loc_type}")
+                cfg = dens_map[loc_type]
+
                 vlist = videos_by_cam_day[(date_str, cam_id)]
                 if video_idx >= len(vlist):
                     continue
@@ -1065,8 +1190,8 @@ def main():
                         cam_id,        # source (Camera)
                         loc_id,        # destination (Location)
                         "LOCATED_AT",
-                        "",          # ts_start
-                        "",          # ts_end
+                        "",          # start_time
+                        "",          # end_time
                         "",          # date
                         "",          # tw_id
                         str(part),     # partition_id
@@ -1131,11 +1256,32 @@ def main():
                 target_persons = min(int(base_p * mult), len(pool_p))
                 # If interactions are enabled and there are at least two people
                 # available in the pool, guarantee at least two persons in this TW.
+                # if cfg.interact_ratio > 0 and target_persons < 2 and len(pool_p) >= 2:
+                #     target_persons = 2
+                # target_vehicles = min(int(base_v * mult), len(pool_v))
+                # if camera_to_indoor.get(cam_id, False) or loc_type in INDOOR_LOC_TYPES:
+                #     target_vehicles = 0
+
+                target_persons = min(int(base_p * mult), len(pool_p))
                 if cfg.interact_ratio > 0 and target_persons < 2 and len(pool_p) >= 2:
                     target_persons = 2
+
                 target_vehicles = min(int(base_v * mult), len(pool_v))
-                if camera_to_indoor.get(cam_id, False) or loc_type in INDOOR_LOC_TYPES:
+
+                # Campus-aware vehicle presence:
+                # - No vehicles in clearly indoor-only spaces
+                # - Limited vehicles near building entrances
+                # - Ensure some vehicle presence in gate / road / parking contexts
+                if loc_type in {"Office", "Classroom", "Corridor", "Lobby"}:
                     target_vehicles = 0
+                elif loc_type == "BuildingEntrance":
+                    target_vehicles = min(target_vehicles, 1)
+                elif loc_type == "Gate":
+                    target_vehicles = max(target_vehicles, 1)
+                elif loc_type == "OutdoorWalkway":
+                    target_vehicles = max(target_vehicles, 1 if rng.random() < 0.35 else 0)
+                elif loc_type in {"Road", "Parking"}:
+                    target_vehicles = max(target_vehicles, 1)
 
                 # --- Cross‑camera movement logic ---
                 # We maintain a dictionary of active persons per camera across time windows.
@@ -1341,8 +1487,8 @@ def main():
                         pid_tw,                 # source_id
                         ent_video_id,           # destination_id
                         "DETECTED_IN",          # type
-                        p_det_start,            # ts_start (datetime)
-                        p_det_end,              # ts_end (datetime)
+                        p_det_start,            # start_time (datetime)
+                        p_det_end,              # end_time (datetime)
                         date_str,               # date
                         tw_key,                 # tw_id
                         str(part),              # partition_id
@@ -1357,8 +1503,8 @@ def main():
                     det_index[(tw_key, ent_video_id)].append(pid_tw)
                     detection_count_by_entity[pid_tw] += 1
                     det_by_entity[pid_tw] = {
-                        "ts_start": p_det_start.isoformat(sep=" "),
-                        "ts_end": p_det_end.isoformat(sep=" "),
+                        "start_time": p_det_start.isoformat(sep=" "),
+                        "end_time": p_det_end.isoformat(sep=" "),
                         "video_id": ent_video_id,
                         "camera_id": ent_cam_id,
                         "location_id": ent_loc_id,
@@ -1431,8 +1577,8 @@ def main():
                     det_index[(tw_key, ent_video_id)].append(tid_tw)
                     detection_count_by_entity[tid_tw] += 1
                     det_by_entity[tid_tw] = {
-                        "ts_start": t_det_start.isoformat(sep=" "),
-                        "ts_end": t_det_end.isoformat(sep=" "),
+                        "start_time": t_det_start.isoformat(sep=" "),
+                        "end_time": t_det_end.isoformat(sep=" "),
                         "video_id": ent_video_id,
                         "camera_id": ent_cam_id,
                         "location_id": ent_loc_id,
@@ -1526,8 +1672,8 @@ def main():
                     det_index[(tw_key, ent_video_id)].append(vh_tw)
                     detection_count_by_entity[vh_tw] += 1
                     det_by_entity[vh_tw] = {
-                        "ts_start": v_det_start.isoformat(sep=" "),
-                        "ts_end": v_det_end.isoformat(sep=" "),
+                        "start_time": v_det_start.isoformat(sep=" "),
+                        "end_time": v_det_end.isoformat(sep=" "),
                         "video_id": ent_video_id,
                         "camera_id": ent_cam_id,
                         "location_id": ent_loc_id,
@@ -1548,8 +1694,8 @@ def main():
     det_cache: Dict[str, Dict[str, object]] = {}
     for ent_tw_id, det in det_by_entity.items():
         det_cache[ent_tw_id] = {
-            "ts_start": datetime.fromisoformat(det["ts_start"]),
-            "ts_end": datetime.fromisoformat(det["ts_end"]),
+            "start_time": datetime.fromisoformat(det["start_time"]),
+            "end_time": datetime.fromisoformat(det["end_time"]),
             "video_id": det["video_id"],
             "camera_id": det["camera_id"],
             "location_id": det["location_id"],
@@ -1567,122 +1713,241 @@ def main():
         things = sorted([eid for eid in entity_list if eid.startswith("T")])
         vehicles = sorted([eid for eid in entity_list if eid.startswith("V")])
 
-        # INTERACTS_WITH (Person <-> Person), undirected via two directed rows.
-        person_interact_count = defaultdict(int)
-        person_interact_cap = {pid: rng.randint(3, 5) for pid in persons}
-        for i in range(len(persons)):
-            a = persons[i]
-            a_det = det_cache[a]
-            for j in range(i + 1, len(persons)):  # ensures A.id < B.id
-                b = persons[j]
-                b_det = det_cache[b]
-                ov = overlap_interval(get_det_datetime(a, "ts_start"), get_det_datetime(a, "ts_end"), get_det_datetime(b, "ts_start"), get_det_datetime(b, "ts_end"))
-                if ov is None:
-                    continue
-                if person_interact_count[a] >= person_interact_cap[a] or person_interact_count[b] >= person_interact_cap[b]:
-                    continue
-                loc_id = str(a_det["location_id"])
-                loc_type = loc_to_type.get(loc_id, "Outdoor")
-                p_interact = dens_map.get(loc_type, dens_map["Outdoor"]).interact_ratio
-                if rng.random() > p_interact:
-                    continue
-                ts_start, ts_end = ov
-                for src, dst in ((a, b), (b, a)):
-                    edge_key = (src, dst, "INTERACTS_WITH", ts_start.isoformat(sep=" "), ts_end.isoformat(sep=" "))
-                    if edge_key in relation_edge_keys:
-                        continue
-                    relation_edge_keys.add(edge_key)
-                    src_det = det_cache[src]
-                    part = loc_to_partition[str(src_det["location_id"])]
-                    row = [
-                        src,
-                        dst,
-                        "INTERACTS_WITH",
-                        ts_start,
-                        ts_end,
-                        ts_start.strftime("%Y-%m-%d"),
-                        tw_id,
-                        str(part),
-                        src_det["camera_id"],
-                        src_det["location_id"],
-                        "",
-                        "",
-                        "",
-                    ]
-                    rels_w.writerow(row)
-                    partition_writers.writerow(part, "rels.csv", row)
-                person_interact_count[a] += 1
-                person_interact_count[b] += 1
+        num_persons = len(persons)
+        # interacts_cap = max(0, num_persons // 2)
+        carries_cap = max(0, int(num_persons * 0.45))
+        uses_cap = max(0, int(num_persons * 0.15))
+        if vehicles and num_persons > 0 and uses_cap == 0:
+            uses_cap = 1
 
-        # CARRIES (Person -> Thing), overlap-only and no duplicates.
-        for pid in persons:
-            p_det = det_cache[pid]
-            candidates = []
-            for tid in things:
-                t_det = det_cache[tid]
-                ov = overlap_interval(get_det_datetime(pid, "ts_start"), get_det_datetime(pid, "ts_end"), get_det_datetime(tid, "ts_start"), get_det_datetime(tid, "ts_end"))
+        # INTERACTS_WITH (Person <-> Person), much sparser and stricter.
+        interacts_candidates: List[Tuple[str, str, datetime, datetime]] = []
+        interact_pairs_seen = set()
+        interact_person_degree = defaultdict(int)
+
+        # Stronger damping than current version
+        if num_persons <= 1:
+            p_interact = 0.0
+            max_pairs_per_person = 0
+        elif num_persons == 2:
+            p_interact = 0.12
+            max_pairs_per_person = 1
+        elif num_persons <= 4:
+            p_interact = 0.20
+            max_pairs_per_person = 1
+        elif num_persons <= 8:
+            p_interact = 0.16
+            max_pairs_per_person = 1
+        else:
+            p_interact = 0.05
+            max_pairs_per_person = 1
+
+        # Cap logical pairs much tighter than before
+        interacts_cap = max(0, int(num_persons * 0.30))
+
+        for a in persons:
+            if interact_person_degree[a] >= max_pairs_per_person:
+                continue
+            if rng.random() > p_interact:
+                continue
+
+            overlap_candidates = []
+            for b in persons:
+                if b == a:
+                    continue
+                if interact_person_degree[b] >= max_pairs_per_person:
+                    continue
+
+                pair_key = tuple(sorted((a, b)))
+                if pair_key in interact_pairs_seen:
+                    continue
+
+                ov = overlap_interval(
+                    get_det_datetime(a, "start_time"), get_det_datetime(a, "end_time"),
+                    get_det_datetime(b, "start_time"), get_det_datetime(b, "end_time")
+                )
                 if ov is None:
                     continue
-                t_global = tid.split("_TW", 1)[0]
-                t_type = thing_attrs.get(t_global, ("Bag", "Medium", "Black"))[0]
-                preferred = t_type in preferred_carry_types
-                candidates.append((tid, ov, preferred))
-            if not candidates:
+
+                overlap_candidates.append((b, ov))
+
+            if not overlap_candidates:
                 continue
-            candidates.sort(key=lambda x: (not x[2], x[0]))
-            k = rng.randint(0, min(2, len(candidates)))
-            for tid, (ts_start, ts_end), _pref in candidates[:k]:
-                edge_key = (pid, tid, "CARRIES", ts_start.isoformat(sep=" "), ts_end.isoformat(sep=" "))
+
+            # Always choose at most 1 partner
+            b, (start_time, end_time) = rng.choice(overlap_candidates)
+            pair_key = tuple(sorted((a, b)))
+
+            if pair_key in interact_pairs_seen:
+                continue
+            if interact_person_degree[a] >= max_pairs_per_person:
+                continue
+            if interact_person_degree[b] >= max_pairs_per_person:
+                continue
+
+            interact_pairs_seen.add(pair_key)
+            interact_person_degree[a] += 1
+            interact_person_degree[b] += 1
+            interacts_candidates.append((a, b, start_time, end_time))
+
+        if len(interacts_candidates) > interacts_cap:
+            interacts_candidates = rng.sample(interacts_candidates, interacts_cap)
+
+        for a, b, start_time, end_time in interacts_candidates:
+            for src, dst in ((a, b), (b, a)):
+                edge_key = (src, dst, start_time.isoformat(sep=" "), end_time.isoformat(sep=" "), "INTERACTS_WITH")
                 if edge_key in relation_edge_keys:
                     continue
                 relation_edge_keys.add(edge_key)
-                part = loc_to_partition[str(p_det["location_id"])]
+
+                src_det = det_cache[src]
+                part = loc_to_partition[str(src_det["location_id"])]
                 row = [
-                    pid,
-                    tid,
-                    "CARRIES",
-                    ts_start,
-                    ts_end,
-                    ts_start.strftime("%Y-%m-%d"),
+                    src,
+                    dst,
+                    "INTERACTS_WITH",
+                    start_time,
+                    end_time,
+                    start_time.strftime("%Y-%m-%d"),
                     tw_id,
                     str(part),
-                    p_det["camera_id"],
-                    p_det["location_id"],
+                    src_det["camera_id"],
+                    src_det["location_id"],
                     "",
                     "",
                     "",
                 ]
                 rels_w.writerow(row)
                 partition_writers.writerow(part, "rels.csv", row)
+       
 
-        # USES (Person -> Vehicle), overlap-only, outdoor-type locations only.
+        # CARRIES (Person -> Thing), selective, type-aware, max one thing per person + hard cap.
+        carries_candidates: List[Tuple[str, str, datetime, datetime]] = []
+        used_things = set()
+        p_carry = 0.52
+        carry_type_weights = {
+            "Backpack": 1.0,
+            "Bag": 0.9,
+            "Handbag": 0.85,
+            "Suitcase": 0.35,
+            "Box": 0.25,
+        }
         for pid in persons:
-            p_det = det_cache[pid]
-            loc_type = loc_to_type.get(str(p_det["location_id"]), "Outdoor")
-            if loc_type not in OUTDOOR_LOC_TYPES:
+            if rng.random() > p_carry:
                 continue
+            weighted_candidates = []
+            for tid in things:
+                if tid in used_things:
+                    continue
+                ov = overlap_interval(get_det_datetime(pid, "start_time"), get_det_datetime(pid, "end_time"), get_det_datetime(tid, "start_time"), get_det_datetime(tid, "end_time"))
+                if ov is None:
+                    continue
+                base_tid = tid.split("_TW", 1)[0]
+                ttype = thing_attrs.get(base_tid, ("Bag", "Medium", "Black"))[0]
+                type_w = carry_type_weights.get(ttype, 0.15)
+                if ttype.lower() in {"phone", "cellphone", "smartphone"}:
+                    type_w *= 0.2
+                weighted_candidates.append((tid, ov, type_w))
+            if not weighted_candidates:
+                continue
+            chosen_tid, chosen_ov, _ = rng.choices(
+                weighted_candidates,
+                weights=[w for _, _, w in weighted_candidates],
+                k=1,
+            )[0]
+            used_things.add(chosen_tid)
+            carries_candidates.append((pid, chosen_tid, chosen_ov[0], chosen_ov[1]))
+        if len(carries_candidates) > carries_cap:
+            carries_candidates = rng.sample(carries_candidates, carries_cap)
+        carries_seen = set()
+        for pid, tid, start_time, end_time in carries_candidates:
+            edge_key = (pid, tid, start_time.isoformat(sep=" "), end_time.isoformat(sep=" "), "CARRIES")
+            if edge_key in relation_edge_keys or edge_key in carries_seen:
+                continue
+            carries_seen.add(edge_key)
+            relation_edge_keys.add(edge_key)
+            p_det = det_cache[pid]
+            part = loc_to_partition[str(p_det["location_id"])]
+            row = [
+                pid,
+                tid,
+                "CARRIES",
+                start_time,
+                end_time,
+                start_time.strftime("%Y-%m-%d"),
+                tw_id,
+                str(part),
+                p_det["camera_id"],
+                p_det["location_id"],
+                "",
+                "",
+                "",
+            ]
+            rels_w.writerow(row)
+            partition_writers.writerow(part, "rels.csv", row)
+
+        # USES (Person -> Vehicle), rare but not zero on realistic small runs.
+        uses_candidates: List[Tuple[str, str, datetime, datetime]] = []
+
+        p_use_base = 0.16
+        uses_cap = max(0, int(num_persons * 0.12))
+        if vehicles and num_persons > 0 and uses_cap == 0:
+            uses_cap = 1
+
+        uses_seen_person = set()
+
+        for pid in persons:
+            if pid in uses_seen_person:
+                continue
+            if rng.random() > p_use_base:
+                continue
+
+            p_det = det_cache[pid]
+            loc_type = loc_to_type.get(str(p_det["location_id"]), "OutdoorWalkway")
+
+            # Allow USES only in outdoor / traffic-related places
+            # if loc_type not in {"OutdoorWalkway", "Road", "Parking", "Gate"}:
+            if loc_type not in {"BuildingEntrance", "OutdoorWalkway", "Road", "Parking", "Gate"}:
+                continue
+
             vehicle_candidates = []
             for vid in vehicles:
-                v_det = det_cache[vid]
-                ov = overlap_interval(get_det_datetime(pid, "ts_start"), get_det_datetime(pid, "ts_end"), get_det_datetime(vid, "ts_start"), get_det_datetime(vid, "ts_end"))
+                ov = overlap_interval(
+                    get_det_datetime(pid, "start_time"), get_det_datetime(pid, "end_time"),
+                    get_det_datetime(vid, "start_time"), get_det_datetime(vid, "end_time")
+                )
                 if ov is None:
                     continue
                 vehicle_candidates.append((vid, ov))
+
             if not vehicle_candidates:
                 continue
-            chosen_vid, (ts_start, ts_end) = rng.choice(vehicle_candidates)
-            edge_key = (pid, chosen_vid, "USES", ts_start.isoformat(sep=" "), ts_end.isoformat(sep=" "))
-            if edge_key in relation_edge_keys:
+
+            chosen_vid, (start_time, end_time) = rng.choice(vehicle_candidates)
+            uses_candidates.append((pid, chosen_vid, start_time, end_time))
+            uses_seen_person.add(pid)
+
+        if len(uses_candidates) > uses_cap:
+            uses_candidates = rng.sample(uses_candidates, uses_cap)
+
+        uses_seen = set()
+        for pid, chosen_vid, start_time, end_time in uses_candidates:
+            edge_key = (pid, chosen_vid, start_time.isoformat(sep=' '), end_time.isoformat(sep=' '), "USES")
+            if edge_key in relation_edge_keys or edge_key in uses_seen:
                 continue
+
+            uses_seen.add(edge_key)
             relation_edge_keys.add(edge_key)
+
+            p_det = det_cache[pid]
             part = loc_to_partition[str(p_det["location_id"])]
             row = [
                 pid,
                 chosen_vid,
                 "USES",
-                ts_start,
-                ts_end,
-                ts_start.strftime("%Y-%m-%d"),
+                start_time,
+                end_time,
+                start_time.strftime("%Y-%m-%d"),
                 tw_id,
                 str(part),
                 p_det["camera_id"],
@@ -1707,15 +1972,15 @@ def main():
     for ent_tw_id, det in sorted(det_by_entity.items()):
         det_by_entity_rows.append([
             ent_tw_id,
-            det["ts_start"],
-            det["ts_end"],
+            det["start_time"],
+            det["end_time"],
             det["video_id"],
             det["camera_id"],
             det["location_id"],
         ])
     write_csv(
         os.path.join(args.out, "detection_index_by_entity.csv"),
-        ["entity_tw_id", "ts_start", "ts_end", "video_id", "camera_id", "location_id"],
+        ["entity_tw_id", "start_time", "end_time", "video_id", "camera_id", "location_id"],
         det_by_entity_rows,
     )
 
