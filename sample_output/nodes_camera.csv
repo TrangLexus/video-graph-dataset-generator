@@ -1,9 +1,0 @@
-camera_id,name,view_type,is_indoor
-C001,Cam_Road_1_1,Wide,false
-C002,Cam_Road_1_2,Entrance,false
-C003,Cam_Outdoor_2_1,Wide,false
-C004,Cam_Outdoor_2_2,Corridor,false
-C005,Cam_Indoor_3_1,Wide,true
-C006,Cam_Indoor_3_2,Wide,true
-C007,Cam_Outdoor_4_1,Zoom,false
-C008,Cam_Outdoor_4_2,Zoom,false
